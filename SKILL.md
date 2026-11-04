@@ -108,3 +108,44 @@ SIGTERM during work/backoff. Confirm no surviving child and no rapid restart loo
   over unwanted alternatives. Missing/ambiguous targets fail the current node.
 - Backward/self jumps need explicit bounds and interruptible waits; they do
   not provide retry backoff. exit.php cannot select a sequence.
+
+# Plan conditional paths before migrating
+
+- First identify decisions: work available, not due yet, healthy/unhealthy,
+  maintenance due, retry allowed/exhausted, and shutdown requested.
+- Sketch numbered nodes and branch destinations before moving code. Prefer
+  small decision nodes over deeply nested conditionals.
+- Use `$GLOBALS['nextSequence'] = $condition ? 30 : 50;` for real alternatives.
+  No assignment means fall-through, NOT workflow completion.
+- End each alternative with an explicit jump to the common continuation;
+  otherwise it may fall through into the other branch.
+- Reserve a final numbered cleanup node. Route requested stops there; set
+  `$state['stop'] = true` and make exit.php return null when it is set.
+- Exceptions skip later nodes: mandatory resource cleanup still needs finally.
+  A jump takes effect only after successful node return.
+- Checkpoint replay may revisit a decision or action. Re-evaluate volatile
+  conditions, persist retry/schedule metadata, and make effects idempotent.
+- Every cycle needs bounded work, an interruptible wait, a shutdown check and,
+  for failures, the durable restart budget. Jumps are not a retry policy.
+
+## Migration patterns
+
+- Script: validate -> decide -> process OR skip -> common finish.
+  Process must jump past skip. Expected no-work is a branch, not an exception.
+- Cron: determine due -> wait OR execute -> persist next event -> determine due.
+  Wait jumps back to determine due. Execution failure branches to bounded
+  retry/backoff or throws on exhaustion; it must not advance the event.
+- Daemon implemented in PHP: check stop/work -> wait OR one work iteration ->
+  check stop/work; route shutdown to cleanup. Keep resources local to a node.
+- Managed php -S or external daemon: branch between preflight/start/skip and
+  after-controller outcomes, but retain child launch, health/maintenance
+  decisions, bounded restarts and finally cleanup inside one controller node.
+  Live process handles cannot cross checkpointed nodes through $state.
+- Inside that controller, use ordinary PHP conditionals for health, maintenance,
+  retry and stop decisions. nextSequence cannot transfer control until it returns.
+
+## Branch tests
+
+Exercise both sides, no-work, not-due, maintenance-due, retry exhaustion and
+shutdown. Verify unused alternatives never run, loops wait, and failure/resume
+preserves the selected path without repeating completed external effects.
