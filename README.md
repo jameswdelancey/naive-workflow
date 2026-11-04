@@ -66,3 +66,33 @@ Checkpoints only apply to executions using this updated runner.
 Existing failures without a checkpoint cannot restore their previous state.
 Failure to launch the returned exit command occurs after checkpoint removal
 and does not resume exit.php.
+
+## Conditional paths
+
+Inside a numbered node:
+
+    global $nextSequence;
+    $nextSequence = $state['approved'] ? 30 : 50;
+
+Or assign directly:
+
+    $GLOBALS['nextSequence'] = 50;
+
+The target matches the leading sequence number: 30 selects 30-process.php.
+Leading zeroes are ignored. A target must match exactly one numbered node;
+invalid, missing or ambiguous targets fail the current node.
+
+The variable resets before every node. Leave it unset or null to continue
+in filename order. Selection takes effect only after the node returns
+successfully. It does not skip the remainder of the current PHP file.
+
+After the selected node, normal sequential execution resumes unless it
+selects another target. Branch endpoints must explicitly jump over any
+unwanted alternative branches.
+
+Forward, backward and same-node jumps are supported. Bound loops yourself:
+there is no automatic delay, iteration limit or restart budget for jumps.
+Shared state survives jumps. The selected next node and its input state are
+checkpointed; restarting after its failure resumes that node.
+
+exit.php cannot select a sequence. It retains its command-return convention.

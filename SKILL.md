@@ -97,3 +97,14 @@ description: Migrate PHP scripts, development servers, cron jobs and daemons int
 Test node failure/resume, restored state, unhealthy child, immediate child exit,
 restart-budget exhaustion across runner restarts, cron missed events, and
 SIGTERM during work/backoff. Confirm no surviving child and no rapid restart loop.
+ 
+# Conditional paths
+
+- In a numbered node, use `global $nextSequence; $nextSequence = 30;`
+  or `$GLOBALS['nextSequence'] = $condition ? 30 : 50;`.
+- Targets match one unique leading filename number; leading zeroes are ignored.
+- Selection applies after successful return. Unset/null means sequential.
+- The selector resets each node; state persists. Branch endpoints must jump
+  over unwanted alternatives. Missing/ambiguous targets fail the current node.
+- Backward/self jumps need explicit bounds and interruptible waits; they do
+  not provide retry backoff. exit.php cannot select a sequence.

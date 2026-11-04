@@ -76,7 +76,9 @@ try {
     }
 
     $save();
-    foreach (array_slice($steps, $start) as $node) {
+    for ($position = $start; $position < count($steps); $position++) {
+        $node = $steps[$position];
+        $GLOBALS['nextSequence'] = null;
         $status['node'] = $node;
         $save();
 
@@ -98,6 +100,38 @@ try {
                     throw new RuntimeException('Process replacement requires pcntl_exec');
                 }
             }
+        }
+
+        $target = $GLOBALS['nextSequence'] ?? null;
+        if ($target !== null) {
+            if ($node === 'exit.php') {
+                throw new RuntimeException('nextSequence cannot be set by exit.php');
+            }
+            if ((!is_int($target) && !is_string($target)) ||
+                !preg_match('/^[0-9]+$/D', (string) $target)) {
+                throw new RuntimeException('nextSequence must be a nonnegative integer or digit string');
+            }
+
+            $normalize = static fn(string $value): string => ltrim($value, '0') ?: '0';
+            $matches = [];
+            foreach ($steps as $index => $candidate) {
+                if (preg_match('/^([0-9]+)/', $candidate, $match) &&
+                    $normalize($match[1]) === $normalize((string) $target)) {
+                    $matches[] = $index;
+                }
+            }
+            if (count($matches) !== 1) {
+                throw new RuntimeException("nextSequence $target must identify exactly one numbered node");
+            }
+            $position = $matches[0] - 1;
+        }
+
+        // Persist the selected next node and its input state before continuing.
+        if (isset($steps[$position + 1])) {
+            $write($checkpoint, [
+                'node' => $steps[$position + 1],
+                'state' => $state,
+            ]);
         }
     }
 
