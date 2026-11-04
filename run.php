@@ -2,6 +2,28 @@
 <?php
 declare(strict_types=1);
 
+/**
+ * Request another attempt of the current node after a delay.
+ * Mutations to $state are checkpointed and passed to the next attempt.
+ * Nodes must make external side effects safe to repeat.
+ */
+final class RetryableException extends RuntimeException
+{
+    public readonly int $retryAfterSeconds;
+
+    public function __construct(
+        string $message,
+        int $retryAfterSeconds = 1,
+        ?Throwable $previous = null
+    ) {
+        if ($retryAfterSeconds < 0) {
+            throw new InvalidArgumentException('Retry delay cannot be negative');
+        }
+        $this->retryAfterSeconds = $retryAfterSeconds;
+        parent::__construct($message, 0, $previous);
+    }
+}
+
 $root = __DIR__;
 $name = $argv[1] ?? '';
 if (!preg_match('/^[a-zA-Z0-9_-]+$/D', $name) || !is_dir("$root/workflows/$name")) {
@@ -45,6 +67,7 @@ $save = static function () use (&$status, $write, $runs, $name): void {
 
 $state = [];
 $next = null;
+$retryAt = null;
 try {
     $nodes = glob("$dir/[0-9]*.php") ?: [];
     sort($nodes, SORT_STRING);
@@ -72,6 +95,10 @@ try {
             throw new RuntimeException("Checkpoint node is missing: {$saved['node']}");
         }
         $state = $saved['state'];
+        $retryAt = $saved['retry_at'] ?? null;
+        if ($retryAt !== null && (!is_int($retryAt) || $retryAt < 0)) {
+            throw new RuntimeException('Invalid checkpoint retry deadline');
+        }
         fwrite(STDERR, "$name: resuming {$saved['node']}\n");
     }
 
@@ -82,9 +109,52 @@ try {
         $status['node'] = $node;
         $save();
 
-        // Save input state before execution: retry this node on failure.
-        $write($checkpoint, ['node' => $node, 'state' => $state]);
-        $result = $include("$dir/$node", $state);
+        while (true) {
+            if ($retryAt !== null) {
+                $status['status'] = 'retrying';
+                $status['retry_after_seconds'] = max(0, $retryAt - time());
+                $status['retry_at'] = gmdate('c', $retryAt);
+                $save();
+
+                // Preserve the deadline across interruptions and restarts.
+                while (($remaining = $retryAt - time()) > 0) {
+                    sleep($remaining);
+                }
+                $retryAt = null;
+            }
+
+            $status['status'] = 'running';
+            unset(
+                $status['retry_after_seconds'],
+                $status['retry_at'],
+                $status['retry_error']
+            );
+            $save();
+            $GLOBALS['nextSequence'] = null;
+
+            // Ordinary failures retain the input state of this attempt.
+            $write($checkpoint, ['node' => $node, 'state' => $state]);
+            try {
+                $result = $include("$dir/$node", $state);
+                break;
+            } catch (RetryableException $retry) {
+                // Round upward so the requested delay is never shortened.
+                $retryAt = $retry->retryAfterSeconds === 0
+                    ? time()
+                    : (int) ceil(microtime(true) + $retry->retryAfterSeconds);
+                $write($checkpoint, [
+                    'node' => $node,
+                    'state' => $state,
+                    'retry_at' => $retryAt,
+                ]);
+                $status['retry_error'] = $retry->getMessage();
+                fwrite(
+                    STDERR,
+                    "$name: $node: retryable: {$retry->getMessage()}; " .
+                    "retrying in {$retry->retryAfterSeconds}s\n"
+                );
+            }
+        }
 
         if ($node === 'exit.php') {
             $next = $result;

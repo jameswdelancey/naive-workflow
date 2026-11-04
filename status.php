@@ -9,7 +9,7 @@ foreach (glob(__DIR__ . '/workflows/*', GLOB_ONLYDIR) ?: [] as $dir) {
     $last = is_file($file) ? json_decode(file_get_contents($file), true) : [];
     $last = is_array($last) ? $last : [];
     $status = $last['status'] ?? 'idle';
-    if ($status === 'running' && !is_dir('/proc/' . ($last['pid'] ?? 0))) {
+    if (in_array($status, ['running', 'retrying'], true) && !is_dir('/proc/' . ($last['pid'] ?? 0))) {
         $status = 'stopped';
     }
     $rows[] = ['workflow' => $name, 'status' => $status] + $last;

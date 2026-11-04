@@ -96,3 +96,30 @@ Shared state survives jumps. The selected next node and its input state are
 checkpointed; restarting after its failure resumes that node.
 
 exit.php cannot select a sequence. It retains its command-return convention.
+
+## Runnable example: retry and branching
+
+Run these commands from the directory containing `repos`. The hello workflow requests a retry on its first attempt, waits at least one second, then continues on its second attempt using the checkpointed state. Each fresh run repeats this demonstration. Set `HELLO_APPROVED=1` to select the approved branch; otherwise, the rejected branch is selected.
+
+Example session (the greeting uses your `USER` environment variable):
+
+    jd@jd-macbookpro82:~$ php repos/naive-workflow/run.php hello
+    Hello, jd!
+    Retry demo: requesting retry on attempt 1.
+    hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
+    Retry demo: continued on attempt 2.
+    Choosing node 40.
+    jd: rejected branch.
+    Finished for jd: rejected.
+    jd@jd-macbookpro82:~$ HELLO_APPROVED=1 php repos/naive-workflow/run.php hello
+    Hello, jd!
+    Retry demo: requesting retry on attempt 1.
+    hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
+    Retry demo: continued on attempt 2.
+    Choosing node 30.
+    jd: approved branch.
+    Finished for jd: approved.
+
+Run the automated test for retry status, checkpointed state, the wait, and both branches:
+
+    bash repos/naive-workflow/tests/retry.sh
