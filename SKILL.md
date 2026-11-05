@@ -3,35 +3,88 @@ name: migrate-php-workflow
 description: Migrate PHP scripts, development servers, cron jobs and daemons into sequential PHP workflows.
 ---
 
+# Scope and runtime contract
+
+Use this skill when migrating scripts or services into this repository's
+workflow format. Read `README.md`, `run.php` and the source being migrated
+before changing behavior. Preserve existing application requirements.
+
+Distinguish implemented runner behavior from migration policy: retry budgets,
+child supervision, scheduling and graceful shutdown below must be implemented
+by the workflow; the runner does not supply them.
+
 # Conventions
 
-- Create workflows/<name>/ with zero-padded numbered PHP nodes.
+- Create `workflows/<name>/`; names must match `[a-zA-Z0-9_-]+`.
+  Numbered nodes run in lexicographic order, not numeric order. Use consistently
+  padded prefixes and unique leading sequence numbers.
 - Nodes share $state; use JSON-compatible values. Resolve paths via __DIR__.
-- Send results to stdout, diagnostics to stderr; throw on failure, never exit().
-- A failed run stops. Starting it again retries the checkpointed node with its
-  original input state. Make side effects idempotent.
+- Write demo messages and runtime diagnostics to stderr with `fwrite(STDERR, ...)`;
+  use `fwrite(STDERR, '[' . date('c') . '] ' . "message\n");`.
+  PHP's configured `date.timezone` determines the timezone, not necessarily
+  the OS timezone. Preserve stdout for deliberate data output;
+  `status.php` writes its table or JSON to stdout.
+- Throw on failure; never call `exit()` inside a node.
+- An ordinary uncaught exception stops the run. Restarting restores the input
+  of the failed attempt, not necessarily the input of the node's first attempt.
+  Retryable exceptions preserve mutated state instead. Neither mechanism
+  rolls back external effects or guarantees exactly-once execution.
 - Successful runs discard checkpoints and state. Store durable scheduling and
   restart metadata separately under .runs/<name>/.
-- exit.php returns null or an argv array with an absolute executable.
-  Self-chain: [PHP_BINARY, dirname(__DIR__, 2).'/run.php', basename(__DIR__)].
+- `exit.php` must explicitly return `null` or a nonempty list of strings whose
+  first element is an absolute executable path. Omitting a return is not null.
+  Self-chain: `[PHP_BINARY, dirname(__DIR__, 2).'/run.php', basename(__DIR__)]`.
+  Process replacement requires `pcntl_exec`. PHP CLI `-d` overrides are not
+  automatically forwarded; use persistent configuration or explicit argv.
+  A launch failure after completion does not restore the removed checkpoint.
 - Never recursively launch runners or background unmanaged children.
-- The runner does not supervise, retry, forward signals or clean up children.
-  Implement those responsibilities in a controller node when needed.
+- The runner retries a node only when it throws `RetryableException`; it does
+  not automatically restart failed workflows or supervise, forward signals to,
+  or clean up children. Implement child management in a controller node.
 
-# Restart policy: required for every automatic retry
+# Retryable node exceptions
+
+- Throw `new RetryableException('Not ready', 5)` to retry the same node
+  after at least five seconds; the delay is a nonnegative integer in seconds.
+- On a retryable exception, the runner checkpoints the mutated `$state` and
+  retry deadline, reports `retrying`, waits, and reruns the node. A restart
+  resumes the saved wait or retries immediately if the deadline has passed.
+- Ordinary failures instead retain the input state for the failed attempt and
+  stop the run. `$nextSequence` takes effect only after successful return and
+  is reset on each attempt.
+- There is no built-in retry limit. Apply the durable bounded policy below;
+  checkpointed state alone cannot enforce a budget across fresh runs. Treat
+  side effects as potentially repeated and avoid retrying invalid config.
+- Release resources and terminate/reap managed children in `finally` before
+  allowing a retryable exception to escape. The runner holds the workflow
+  lock during retry waits; another invocation cannot bypass the wait.
+- The persisted deadline uses wall-clock time. Clock changes affect waits;
+  do not treat this mechanism as a precise timer or a graceful shutdown loop.
+
+# Restart policy: required for migrated automatic retries
+
+This is migration policy, not built-in runner enforcement. The hello example
+is a small retry demonstration, not a production restart controller.
+Apply one durable budget to both node retries and child restarts; nesting
+controllers must not multiply the allowed attempts.
 
 - Persist failure timestamps, consecutive failures and not-before time outside
-  $state; checkpoints must not reset the budget.
-- Allow at most three automatic restarts within a rolling ten-minute window.
-  Record each restart before launching; the fourth stops with an exception.
-- Back off 5, 15, then 45 seconds. Honor persisted delays after manual restarts.
+  `$state`, using atomic writes. Validate stored data; protect shared metadata
+  from concurrent writers. Checkpoints and manual reruns must not reset the budget.
+- Allow at most three automatic retries/restarts within a rolling ten-minute
+  window, excluding the initial attempt. Record each authorization before
+  throwing `RetryableException` or launching a replacement. Deny the fourth
+  with an ordinary exception. Check the budget again on manual invocation.
+- Back off 5, 15, then 45 seconds. Honor persisted delays after manual restarts;
+  do not both sleep and request the same full delay through `RetryableException`.
 - Reset the consecutive-failure counter only after ten healthy minutes; retain
   timestamps until they expire. Malformed budget data fails closed.
 - Treat unexpected clean exits as failures for servers and daemons.
 - Normal scheduled completions are not failures. Never automatically retry
   invalid configuration. Do not wrap the runner in an unconditional restart loop.
-- Catch failures inside the controller when retrying; an uncaught exception
-  stops the runner. Cap retries even when an external scheduler starts it again.
+- Catch failures inside a controller when it manages child retries. An uncaught
+  ordinary exception stops the runner; `RetryableException` requests a node
+  retry instead. Cap retries even when an external scheduler starts it again.
 
 # Existing PHP script
 
@@ -40,8 +93,8 @@ description: Migrate PHP scripts, development servers, cron jobs and daemons int
 3. Keep non-JSON resources local to a node. Add timeouts to external operations.
 4. If refactoring is unsafe, invoke the script as a managed foreground child
    with proc_open using an argv array; check its exit status.
-5. For automatic retries, use a controller node and the restart policy above.
-   Otherwise leave failures stopped for an explicit rerun.
+5. For automatic retries, use a controller or a bounded `RetryableException`
+   policy as appropriate. Otherwise leave failures stopped for an explicit rerun.
 
 # php -S server
 
@@ -94,17 +147,32 @@ description: Migrate PHP scripts, development servers, cron jobs and daemons int
 
 # Verify
 
-Test node failure/resume, restored state, unhealthy child, immediate child exit,
-restart-budget exhaustion across runner restarts, cron missed events, and
-SIGTERM during work/backoff. Confirm no surviving child and no rapid restart loop.
- 
+Run `bash tests/retry.sh` from the repository. It checks hello's two branches,
+retry status, checkpointed retry state, a wait observation, final cleanup,
+timestamp formatting and stderr-only demo output (including the poll node).
+It does not establish full interruption, supervision or scheduling coverage.
+
+Add migration-specific tests for:
+
+- Ordinary failure restoring attempt input versus retry preserving mutated state.
+- Interruption during a retry wait and resumption of its persisted deadline.
+- Retry-budget exhaustion across manual reruns and malformed budget files.
+- Unhealthy/immediately exiting children and SIGTERM during work/backoff.
+- Cron missed events, DST behavior and duplicate-event suppression.
+- A non-UTC configured timezone, valid JSON status output and lock contention.
+
+Use temporary workflow copies and bounded test timeouts. Do not run an
+unbounded poller or delete live checkpoints as part of tests. Confirm no
+surviving child and no rapid restart loop. Report which tests actually ran.
+
 # Conditional paths
 
 - In a numbered node, use `global $nextSequence; $nextSequence = 30;`
   or `$GLOBALS['nextSequence'] = $condition ? 30 : 50;`.
-- Targets match one unique leading filename number; leading zeroes are ignored.
+- Targets must be nonnegative integers or digit strings and match one unique
+  leading filename number; leading zeroes are ignored.
 - Selection applies after successful return. Unset/null means sequential.
-- The selector resets each node; state persists. Branch endpoints must jump
+- The selector resets each attempt; state persists. Branch endpoints must jump
   over unwanted alternatives. Missing/ambiguous targets fail the current node.
 - Backward/self jumps need explicit bounds and interruptible waits; they do
   not provide retry backoff. exit.php cannot select a sequence.
@@ -148,4 +216,5 @@ SIGTERM during work/backoff. Confirm no surviving child and no rapid restart loo
 
 Exercise both sides, no-work, not-due, maintenance-due, retry exhaustion and
 shutdown. Verify unused alternatives never run, loops wait, and failure/resume
-preserves the selected path without repeating completed external effects.
+preserves the selected path. Inject failures around external effects to verify
+application-level idempotency; checkpoints alone cannot prevent repetition.
