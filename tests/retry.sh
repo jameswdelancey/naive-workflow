@@ -48,7 +48,7 @@ check_completed() {
     php -r '
         $s = json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR);
         if (($s["status"] ?? null) !== "done" ||
-            ($s["node"] ?? null) !== "50-finish.php" ||
+            ($s["node"] ?? null) !== "exit.php" ||
             isset($s["retry_at"]) ||
             isset($s["retry_after_seconds"]) ||
             isset($s["retry_error"])) {
@@ -57,7 +57,7 @@ check_completed() {
     ' "$tmp/.runs/hello.json" || fail "$branch: invalid final status"
 }
 
-USER=retry-test HELLO_APPROVED=0 php "$tmp/run.php" hello >"$tmp/rejected.stdout" 2>"$tmp/rejected.log" &
+USER=retry-test HELLO_CHILD_POLL=0 HELLO_POLL=0 HELLO_APPROVED=0 php "$tmp/run.php" hello >"$tmp/rejected.stdout" 2>"$tmp/rejected.log" &
 pid=$!
 
 observed=0
@@ -98,7 +98,7 @@ wait "$pid" || fail "rejected workflow failed"
 pid=""
 check_completed rejected
 
-USER=retry-test HELLO_APPROVED=1 php "$tmp/run.php" hello >"$tmp/approved.stdout" 2>"$tmp/approved.log" ||
+USER=retry-test HELLO_CHILD_POLL=0 HELLO_POLL=0 HELLO_APPROVED=1 php "$tmp/run.php" hello >"$tmp/approved.stdout" 2>"$tmp/approved.log" ||
     fail "approved workflow failed"
 check_completed approved
 

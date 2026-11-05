@@ -218,3 +218,46 @@ Exercise both sides, no-work, not-due, maintenance-due, retry exhaustion and
 shutdown. Verify unused alternatives never run, loops wait, and failure/resume
 preserves the selected path. Inject failures around external effects to verify
 application-level idempotency; checkpoints alone cannot prevent repetition.
+
+# Calling another workflow
+
+- For a one-way handoff after successful completion, return
+  `[PHP_BINARY, dirname(__DIR__, 2).'/run.php', 'poll']` from `exit.php`.
+  This uses process replacement, not recursion or a child process; it never
+  returns to the calling workflow.
+- The hello demo enables this with `HELLO_POLL=1`. Leave the option unset
+  or set it to `0` for a finite hello run. Poll itself repeats until stopped.
+- The caller is marked done and its lock released before handoff. The target
+  acquires its own lock and resumes its own checkpoint if present. No `$state`
+  is transferred. A target failure does not roll back the completed caller.
+- Environment variables survive replacement; command-line PHP configuration
+  overrides do not unless explicitly included in the returned argv.
+- If execution must return to the caller, use a managed foreground child
+  inside a controller with bounded waits, exit-status checks and signal/cleanup
+  handling. Do not wait on a child that needs the caller's held workflow lock.
+- Run `bash tests/chain.sh` for the bounded hello-to-poll integration test.
+  It uses isolated copies and disables only the copied poll self-chain.
+  Do not run the production infinite poller as an unattended test.
+
+# Child workflows as nodes
+
+- Use `workflows/hello/55-child-poll.php` as the managed-child example.
+  Enable it with `HELLO_CHILD_POLL=1 HELLO_POLL=0`; the latter disables
+  the independent exit-node handoff.
+- Use an argv array with `proc_open`, not shell command concatenation.
+  Pass `POLL_ONCE=1` only in the child environment to make poll finite.
+  Forward required PHP configuration explicitly, inherit output streams,
+  and keep process handles local to the node rather than in `$state`.
+- Wait with a monotonic timeout; check the child exit code and throw an
+  ordinary exception on failure. Release/reap children in `finally` and
+  restore process-global signal handlers before continuing.
+- A child uses its normal workflow lock and checkpoint, not a new instance.
+  The parent retains its own lock. Avoid self-calls and dependency cycles.
+- Successful child completion is not transactionally linked to the parent's
+  checkpoint. Parent retries may replay child effects; require idempotency.
+  This demo propagates errors rather than automatically retrying children.
+- Cleanup covers the direct child on handled stops/errors, not arbitrary
+  descendants, SIGKILL or parent crashes. Use a supervisor where needed.
+- Run `bash tests/child.sh`; it covers the real finite child mode, separate
+  PIDs, parent continuation, reaping and failure propagation. Add dedicated
+  signal/timeout tests before relying on this pattern for a production service.

@@ -179,3 +179,83 @@ Run the automated test from the directory containing `repos`:
 Test status reporting from the directory containing `repos`:
 
     bash repos/naive-workflow/tests/status.sh
+
+## Handing off to another workflow
+
+A workflow can return another runner command from `exit.php`. This replaces
+the current process after successful completion; it is not a function call
+and does not return to the original workflow.
+
+The hello example opts into this handoff with `HELLO_POLL=1`:
+
+    HELLO_POLL=1 php repos/naive-workflow/run.php hello
+
+Hello finishes, logs `Handing off to poll.` on stderr, and starts poll using
+the same PID. Poll then repeats until stopped with Ctrl-C. Without
+`HELLO_POLL=1`, hello's exit node explicitly returns null and stops.
+
+The command returned by hello's exit node is:
+
+    return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'poll'];
+
+The runner marks hello done and releases its lock before replacing itself.
+Poll uses its own lock, status and checkpoint. State is not transferred:
+poll starts empty unless it resumes its own existing checkpoint. Persist
+shared data explicitly if needed. Environment variables are inherited;
+PHP CLI `-d` options are not automatically forwarded. Configure
+`date.timezone` persistently or include required options in the returned argv.
+
+If poll cannot start, hello remains done; this is not a cross-workflow
+transaction. For a call that must return, a controller must explicitly manage
+a foreground child and its exit status, signals and cleanup instead.
+
+Run the bounded handoff test:
+
+    bash repos/naive-workflow/tests/chain.sh
+
+The test uses temporary workflow copies and changes only the copied poll
+exit node to return null after one real tick/wait iteration. It verifies
+handoff ordering, the unchanged PID, status/checkpoint completion, stderr
+output and the default non-handoff path without leaving a poller running.
+
+## Calling a child workflow as a node
+
+Unlike an `exit.php` handoff, a managed child runs in a separate process.
+The parent node waits, checks its exit status, then returns so the parent
+workflow can continue. The hello example implements this in
+`55-child-poll.php`, after its finish message and before its exit node.
+
+From the directory containing `repos`:
+
+    HELLO_CHILD_POLL=1 HELLO_POLL=0 php repos/naive-workflow/run.php hello
+
+The node starts `php run.php poll` with `POLL_ONCE=1` in the child's environment.
+Poll performs one tick and its five-second wait, then returns null from its
+exit node. Ordinary poll runs still repeat unless `POLL_ONCE=1` is set.
+`HELLO_POLL` controls the separate one-way handoff; keep it `0` when trying
+only the child example.
+
+The child inherits stdout/stderr and receives the parent's effective PHP
+timezone explicitly. Parent and child have separate state, status, locks
+and checkpoints; the parent holds its lock while waiting. An existing poll
+checkpoint is resumed, and an already-running poll causes the child invocation
+to fail. This is not an isolated per-call workflow instance.
+
+The node requires pcntl signal functions, imposes a 30-second execution timeout,
+and treats nonzero child exits as ordinary parent-node failures. On a handled
+stop or error it terminates and reaps the direct child, with a five-second
+termination grace period. It restores the parent's signal handlers afterward.
+SIGKILL or a parent crash cannot guarantee child cleanup; use an external
+supervisor when that guarantee is required.
+
+A parent retry may execute an already-completed child again. There is no
+cross-workflow transaction or automatic state/result transfer; child effects
+must be idempotent. Do not call the same workflow, or create a dependency
+cycle that needs a lock held by a waiting ancestor.
+
+Run the isolated integration test:
+
+    bash repos/naive-workflow/tests/child.sh
+
+It runs the actual finite poll mode and checks distinct PIDs, parent
+continuation, completion, child reaping and child-failure propagation.
