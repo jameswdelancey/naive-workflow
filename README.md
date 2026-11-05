@@ -44,7 +44,21 @@ The exit node cannot select a sequence.
 Only one invocation of a workflow can run at a time. The `.runs/` directory
 holds locks, the latest status and checkpoints, not execution history.
 Status uses `/proc` for best-effort detection of unexpectedly stopped
-processes.
+processes. This is not a health check: PID reuse may hide a stopped run.
+If `/proc` is unavailable, the recorded status is retained.
+
+The table includes the saved retry deadline with its original timezone offset.
+`UPDATED AT` (JSON: `updated_at`) shows the modification time of the exact
+status-file snapshot read, formatted in the status command's configured local
+timezone. It is not the query time or a workflow heartbeat. Contents and file
+metadata are read through the same handle so atomic replacements cannot mix
+snapshots. Missing timestamps display `-` in the table and `null` in JSON.
+The filesystem timestamp has second-level display precision and can change
+if external tools edit or touch the file; it is not a durability guarantee.
+`--json` preserves the recorded metadata; `retry_after_seconds` is a saved
+snapshot, not a live countdown. Missing status files report `idle`; unreadable
+or malformed files report `unknown`, emit timestamped stderr diagnostics and
+make the command exit nonzero while still reporting other workflows.
 
 To start the polling example in the background from the repository directory:
 
@@ -161,3 +175,7 @@ illustrative; the greeting uses the `USER` environment variable):
 Run the automated test from the directory containing `repos`:
 
     bash repos/naive-workflow/tests/retry.sh
+
+Test status reporting from the directory containing `repos`:
+
+    bash repos/naive-workflow/tests/status.sh
