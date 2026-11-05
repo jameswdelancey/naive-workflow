@@ -1,76 +1,105 @@
 # Naive workflow
 
+A small PHP CLI workflow runner with sequential nodes, conditional paths,
+checkpointing and retryable exceptions.
+
+## Quick start
+
+From the repository directory:
+
     php run.php hello
+    HELLO_APPROVED=1 php run.php hello
     php run.php poll
     php status.php
     php status.php --json
 
-Stop polling with Ctrl-C.
+Stop polling with Ctrl-C. Demo messages and runtime diagnostics go to stderr;
+`status.php` writes its human-readable or JSON output to stdout.
 
-Each workflows/ subdirectory is a workflow.
-Numbered PHP files execute sequentially in lexicographic order.
-Use zero-padded prefixes such as 10-fetch.php and 20-process.php.
+## Workflows and nodes
 
-Nodes share $state, an array reset at the start of each invocation.
-Persist data explicitly when needed across polling iterations.
-Write all demo messages and runtime diagnostics to stderr using fwrite(STDERR, ...).
-Reserve stdout for explicitly requested machine-readable output, such as status.php --json.
-Throw exceptions to fail; do not call exit() inside nodes.
+Each subdirectory of `workflows/` is a workflow. Numbered PHP files execute
+in lexicographic order; use zero-padded prefixes such as `10-fetch.php` and
+`20-process.php`.
 
-Optional exit.php runs after successful nodes.
-Return null to stop, or an argv array to replace the process:
+Nodes share a JSON-compatible `$state` array. A fresh invocation starts with
+an empty array unless it resumes a checkpoint. Successful polling iterations
+also start with an empty state; persist data externally if it must survive
+between iterations.
+
+Write demo messages to stderr using `fwrite(STDERR, ...)`. Throw exceptions
+to signal errors; do not call `exit()` inside nodes.
+
+An optional `exit.php` runs after the numbered nodes. Return `null` to stop,
+or return an argv array to replace the current process:
 
     return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'hello'];
 
-The executable must have an absolute path. Process replacement requires
-pcntl_exec and avoids accumulating processes during polling.
+The executable path must be absolute and executable. Process replacement
+requires `pcntl_exec`; it avoids accumulating processes during polling.
+The exit node cannot select a sequence.
 
-Only one invocation per workflow runs at a time.
-.runs/ holds locks and latest status, not execution history.
-Unexpected termination can leave stale metadata; status uses /proc for
-best-effort detection. Failed command launches report to stderr and exit
-nonzero, but the completed workflow remains recorded as done.
+## Status and startup
 
-## Startup example
+Only one invocation of a workflow can run at a time. The `.runs/` directory
+holds locks, the latest status and checkpoints, not execution history.
+Status uses `/proc` for best-effort detection of unexpectedly stopped
+processes.
 
+To start the polling example in the background from the repository directory:
+
+    mkdir -p .runs &&
     { nohup php run.php poll >> .runs/poll.log 2>&1 < /dev/null & } &&
     sleep 1 &&
     php status.php
 
-## Automatic resume
+Failed command launches are reported to stderr and exit nonzero, but the
+completed workflow remains recorded as done.
 
-Run the same command again after a failure:
+## Checkpoints and automatic resume
 
-    php run.php hello
+Before each node, the runner atomically saves the node name and its input
+`$state` to `.runs/<workflow>.checkpoint.json`. After an ordinary failure,
+run the same workflow again to resume at that node with its saved input
+state; changes made during the failed attempt are discarded.
 
-Before each node, the runner atomically saves its filename and input $state
-in .runs/<workflow>.checkpoint.json. The next invocation automatically
-resumes there, skipping earlier nodes and restoring that input state.
-Changes made to $state inside the failed node are discarded.
+Successful workflows remove their checkpoint. `exit.php` is checkpointed
+too, but a failure to launch its returned command occurs after checkpoint
+removal and does not resume `exit.php`.
 
-This overrides the earlier empty-state rule when a checkpoint exists.
-Successful workflows remove their checkpoint, so successful polling
-iterations still start fresh. exit.php is also checkpointed.
-
-Keep shared state JSON-compatible: arrays, strings, finite numbers,
-booleans and null. Objects, resources and closures are not supported.
+Keep shared state JSON-compatible: arrays, strings, finite numbers, booleans
+and null. Objects, resources and closures are not supported.
 
 Nodes must be safe to retry. Files, network requests and other external
-effects are not rolled back. A crash after an external effect but before
-the next checkpoint can cause that effect to be repeated.
+effects are not rolled back. A crash after an external effect but before the
+next checkpoint can cause that effect to be repeated.
 
 To restart from scratch, stop the workflow first, then remove its checkpoint:
 
     rm -f .runs/hello.checkpoint.json
 
-Checkpoints only apply to executions using this updated runner.
-Existing failures without a checkpoint cannot restore their previous state.
-Failure to launch the returned exit command occurs after checkpoint removal
-and does not resume exit.php.
+## Retryable exceptions
+
+A node can request another attempt by throwing `RetryableException` with a
+message and a nonnegative delay in seconds:
+
+    $state['attempts'] = ($state['attempts'] ?? 0) + 1;
+    if ($state['attempts'] === 1) {
+        throw new RetryableException('Not ready yet', 1);
+    }
+
+Unlike an ordinary failure, a retryable exception checkpoints the state
+mutated by that attempt. The runner reports `retrying`, waits at least the
+requested delay and reruns the same node. The retry deadline and state remain
+in the checkpoint if the process stops; restarting resumes the wait or retries
+immediately if the deadline has passed.
+
+Retries have no automatic limit. Nodes should manage their own retry budget
+where needed and make external side effects safe to repeat.
 
 ## Conditional paths
 
-Inside a numbered node:
+Inside a numbered node, select another numbered node using:
 
     global $nextSequence;
     $nextSequence = $state['approved'] ? 30 : 50;
@@ -79,54 +108,56 @@ Or assign directly:
 
     $GLOBALS['nextSequence'] = 50;
 
-The target matches the leading sequence number: 30 selects 30-process.php.
-Leading zeroes are ignored. A target must match exactly one numbered node;
-invalid, missing or ambiguous targets fail the current node.
+The target matches the leading sequence number: `30` selects
+`30-process.php`. Leading zeroes are ignored. A target must match exactly one
+numbered node; invalid, missing or ambiguous targets fail the current node.
 
-The variable resets before every node. Leave it unset or null to continue
+The variable resets before every attempt. Leave it unset or null to continue
 in filename order. Selection takes effect only after the node returns
-successfully. It does not skip the remainder of the current PHP file.
+successfully; it does not skip the remainder of the current PHP file.
 
 After the selected node, normal sequential execution resumes unless it
-selects another target. Branch endpoints must explicitly jump over any
-unwanted alternative branches.
-
-Forward, backward and same-node jumps are supported. Bound loops yourself:
-there is no automatic delay, iteration limit or restart budget for jumps.
-Shared state survives jumps. The selected next node and its input state are
-checkpointed; restarting after its failure resumes that node.
-
-exit.php cannot select a sequence. It retains its command-return convention.
+selects another target. Branch endpoints must explicitly jump over unwanted
+alternatives. Forward, backward and same-node jumps are supported; bound
+loops yourself. There is no automatic delay or iteration limit for jumps.
 
 ## Runnable example: retry and branching
 
-Run these commands from the directory containing `repos`. The hello workflow requests a retry on its first attempt, waits at least one second, then continues on its second attempt using the checkpointed state. Each fresh run repeats this demonstration. Set `HELLO_APPROVED=1` to select the approved branch; otherwise, the rejected branch is selected.
+From the directory containing `repos`, run:
 
-All demo output and runtime diagnostics are written to stderr and use a `[YYYY-MM-DDTHH:MM:SS±HH:MM]` local timestamp prefix, including the UTC offset.
-Local time follows PHP's configured `date.timezone`; if it is set to UTC, output remains UTC.
-To select a timezone explicitly, use, for example:
+    php repos/naive-workflow/run.php hello
+    HELLO_APPROVED=1 php repos/naive-workflow/run.php hello
 
-    php -d date.timezone=America/New_York repos/naive-workflow/run.php hello
+Each fresh run requests a retry on the first attempt and continues on the
+second using the checkpointed state. `HELLO_APPROVED=1` selects the approved
+branch; otherwise, the rejected branch is selected.
 
-Example session (timestamps are illustrative; the greeting uses your `USER` environment variable):
+Demo messages and runtime diagnostics use local timestamps with UTC offsets.
+PHP's configured `date.timezone` determines local time; if it is set to UTC,
+the output remains UTC. For example, to select Los Angeles explicitly:
+
+    php -d date.timezone=America/Los_Angeles repos/naive-workflow/run.php hello
+
+Example session with `America/Los_Angeles` configured (timestamps are
+illustrative; the greeting uses the `USER` environment variable):
 
     jd@jd-macbookpro82:~$ php repos/naive-workflow/run.php hello
-    [2026-11-04T12:00:00+00:00] Hello, jd!
-    [2026-11-04T12:00:00+00:00] Retry demo: requesting retry on attempt 1.
-    [2026-11-04T12:00:00+00:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
-    [2026-11-04T12:00:02+00:00] Retry demo: continued on attempt 2.
-    [2026-11-04T12:00:02+00:00] Choosing node 40.
-    [2026-11-04T12:00:02+00:00] jd: rejected branch.
-    [2026-11-04T12:00:02+00:00] Finished for jd: rejected.
+    [2026-11-04T12:00:00-08:00] Hello, jd!
+    [2026-11-04T12:00:00-08:00] Retry demo: requesting retry on attempt 1.
+    [2026-11-04T12:00:00-08:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
+    [2026-11-04T12:00:02-08:00] Retry demo: continued on attempt 2.
+    [2026-11-04T12:00:02-08:00] Choosing node 40.
+    [2026-11-04T12:00:02-08:00] jd: rejected branch.
+    [2026-11-04T12:00:02-08:00] Finished for jd: rejected.
     jd@jd-macbookpro82:~$ HELLO_APPROVED=1 php repos/naive-workflow/run.php hello
-    [2026-11-04T12:00:10+00:00] Hello, jd!
-    [2026-11-04T12:00:10+00:00] Retry demo: requesting retry on attempt 1.
-    [2026-11-04T12:00:10+00:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
-    [2026-11-04T12:00:12+00:00] Retry demo: continued on attempt 2.
-    [2026-11-04T12:00:12+00:00] Choosing node 30.
-    [2026-11-04T12:00:12+00:00] jd: approved branch.
-    [2026-11-04T12:00:12+00:00] Finished for jd: approved.
+    [2026-11-04T12:00:10-08:00] Hello, jd!
+    [2026-11-04T12:00:10-08:00] Retry demo: requesting retry on attempt 1.
+    [2026-11-04T12:00:10-08:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
+    [2026-11-04T12:00:12-08:00] Retry demo: continued on attempt 2.
+    [2026-11-04T12:00:12-08:00] Choosing node 30.
+    [2026-11-04T12:00:12-08:00] jd: approved branch.
+    [2026-11-04T12:00:12-08:00] Finished for jd: approved.
 
-Run the automated test for retry status, checkpointed state, the wait, and both branches:
+Run the automated test from the directory containing `repos`:
 
     bash repos/naive-workflow/tests/retry.sh
