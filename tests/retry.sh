@@ -28,6 +28,13 @@ check_completed() {
     local branch="$1"
     local log="$tmp/$branch.log"
 
+    [[ ! -s "$tmp/$branch.stdout" ]] ||
+        fail "$branch: demo output leaked to stdout"
+
+    if grep -Ev '^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}\] ' "$log"; then
+        fail "$branch: output is missing a uniform local timestamp"
+    fi
+
     [[ "$(grep -Fc 'Retry demo: requesting retry on attempt 1.' "$log")" == 1 ]] ||
         fail "$branch: first attempt was not executed exactly once"
     [[ "$(grep -Fc 'Retry demo: continued on attempt 2.' "$log")" == 1 ]] ||
@@ -50,7 +57,7 @@ check_completed() {
     ' "$tmp/.runs/hello.json" || fail "$branch: invalid final status"
 }
 
-USER=retry-test HELLO_APPROVED=0 php "$tmp/run.php" hello >"$tmp/rejected.log" 2>&1 &
+USER=retry-test HELLO_APPROVED=0 php "$tmp/run.php" hello >"$tmp/rejected.stdout" 2>"$tmp/rejected.log" &
 pid=$!
 
 observed=0
@@ -91,8 +98,20 @@ wait "$pid" || fail "rejected workflow failed"
 pid=""
 check_completed rejected
 
-USER=retry-test HELLO_APPROVED=1 php "$tmp/run.php" hello >"$tmp/approved.log" 2>&1 ||
+USER=retry-test HELLO_APPROVED=1 php "$tmp/run.php" hello >"$tmp/approved.stdout" 2>"$tmp/approved.log" ||
     fail "approved workflow failed"
 check_completed approved
 
 printf 'PASS: retry status, checkpointed state, node wait, second attempt, and both hello branches\n'
+
+php -r '$state = []; require $argv[1];' \
+    "$root/workflows/poll/10-tick.php" \
+    >"$tmp/poll.stdout" 2>"$tmp/poll.log" ||
+    fail "poll node failed"
+
+[[ ! -s "$tmp/poll.stdout" ]] || fail "poll output leaked to stdout"
+[[ "$(wc -l < "$tmp/poll.log")" == 1 ]] || fail "unexpected poll output"
+grep -Eq '^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}\] polling$' \
+    "$tmp/poll.log" || fail "poll stderr timestamp missing"
+
+printf 'PASS: hello and poll messages use timestamped stderr; stdout remains empty\n'

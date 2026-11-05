@@ -13,7 +13,8 @@ Use zero-padded prefixes such as 10-fetch.php and 20-process.php.
 
 Nodes share $state, an array reset at the start of each invocation.
 Persist data explicitly when needed across polling iterations.
-Write results to stdout and diagnostics to stderr.
+Write all demo messages and runtime diagnostics to stderr using fwrite(STDERR, ...).
+Reserve stdout for explicitly requested machine-readable output, such as status.php --json.
 Throw exceptions to fail; do not call exit() inside nodes.
 
 Optional exit.php runs after successful nodes.
@@ -101,24 +102,30 @@ exit.php cannot select a sequence. It retains its command-return convention.
 
 Run these commands from the directory containing `repos`. The hello workflow requests a retry on its first attempt, waits at least one second, then continues on its second attempt using the checkpointed state. Each fresh run repeats this demonstration. Set `HELLO_APPROVED=1` to select the approved branch; otherwise, the rejected branch is selected.
 
-Example session (the greeting uses your `USER` environment variable):
+All demo output and runtime diagnostics are written to stderr and use a `[YYYY-MM-DDTHH:MM:SS±HH:MM]` local timestamp prefix, including the UTC offset.
+Local time follows PHP's configured `date.timezone`; if it is set to UTC, output remains UTC.
+To select a timezone explicitly, use, for example:
+
+    php -d date.timezone=America/New_York repos/naive-workflow/run.php hello
+
+Example session (timestamps are illustrative; the greeting uses your `USER` environment variable):
 
     jd@jd-macbookpro82:~$ php repos/naive-workflow/run.php hello
-    Hello, jd!
-    Retry demo: requesting retry on attempt 1.
-    hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
-    Retry demo: continued on attempt 2.
-    Choosing node 40.
-    jd: rejected branch.
-    Finished for jd: rejected.
+    [2026-11-04T12:00:00+00:00] Hello, jd!
+    [2026-11-04T12:00:00+00:00] Retry demo: requesting retry on attempt 1.
+    [2026-11-04T12:00:00+00:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
+    [2026-11-04T12:00:02+00:00] Retry demo: continued on attempt 2.
+    [2026-11-04T12:00:02+00:00] Choosing node 40.
+    [2026-11-04T12:00:02+00:00] jd: rejected branch.
+    [2026-11-04T12:00:02+00:00] Finished for jd: rejected.
     jd@jd-macbookpro82:~$ HELLO_APPROVED=1 php repos/naive-workflow/run.php hello
-    Hello, jd!
-    Retry demo: requesting retry on attempt 1.
-    hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
-    Retry demo: continued on attempt 2.
-    Choosing node 30.
-    jd: approved branch.
-    Finished for jd: approved.
+    [2026-11-04T12:00:10+00:00] Hello, jd!
+    [2026-11-04T12:00:10+00:00] Retry demo: requesting retry on attempt 1.
+    [2026-11-04T12:00:10+00:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
+    [2026-11-04T12:00:12+00:00] Retry demo: continued on attempt 2.
+    [2026-11-04T12:00:12+00:00] Choosing node 30.
+    [2026-11-04T12:00:12+00:00] jd: approved branch.
+    [2026-11-04T12:00:12+00:00] Finished for jd: approved.
 
 Run the automated test for retry status, checkpointed state, the wait, and both branches:
 

@@ -1,2 +1,2 @@
 <?php
-echo "Finished for {$state['name']}: {$state['result']}.\n";
+fwrite(STDERR, '[' . date('c') . '] ' . "Finished for {$state['name']}: {$state['result']}.\n");

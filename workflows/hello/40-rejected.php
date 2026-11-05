@@ -1,3 +1,3 @@
 <?php
 $state['result'] = 'rejected';
-echo "{$state['name']}: rejected branch.\n";
+fwrite(STDERR, '[' . date('c') . '] ' . "{$state['name']}: rejected branch.\n");

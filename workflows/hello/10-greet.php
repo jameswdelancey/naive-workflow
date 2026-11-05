@@ -1,3 +1,3 @@
 <?php
 $state['name'] = getenv('USER') ?: 'world';
-echo "Hello, {$state['name']}!\n";
+fwrite(STDERR, '[' . date('c') . '] ' . "Hello, {$state['name']}!\n");

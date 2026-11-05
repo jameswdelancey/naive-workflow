@@ -1,3 +1,3 @@
 <?php
-$state['time'] = gmdate('c');
-echo "{$state['time']}: polling\n";
+$state['time'] = date('c');
+fwrite(STDERR, "[{$state['time']}] polling\n");

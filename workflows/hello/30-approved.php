@@ -1,5 +1,5 @@
 <?php
 global $nextSequence;
 $state['result'] = 'approved';
-echo "{$state['name']}: approved branch.\n";
+fwrite(STDERR, '[' . date('c') . '] ' . "{$state['name']}: approved branch.\n");
 $nextSequence = 50;

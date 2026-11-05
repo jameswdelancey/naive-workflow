@@ -27,7 +27,7 @@ final class RetryableException extends RuntimeException
 $root = __DIR__;
 $name = $argv[1] ?? '';
 if (!preg_match('/^[a-zA-Z0-9_-]+$/D', $name) || !is_dir("$root/workflows/$name")) {
-    fwrite(STDERR, "Usage: php run.php <workflow>\n");
+    fwrite(STDERR, '[' . date('c') . '] ' . "Usage: php run.php <workflow>\n");
     exit(1);
 }
 
@@ -39,7 +39,7 @@ if (!is_dir($runs) && !mkdir($runs, 0700, true) && !is_dir($runs)) {
 
 $lock = fopen("$runs/$name.lock", 'c');
 if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
-    fwrite(STDERR, "$name: already running or cannot acquire lock\n");
+    fwrite(STDERR, '[' . date('c') . '] ' . "$name: already running or cannot acquire lock\n");
     exit(1);
 }
 
@@ -59,7 +59,7 @@ $status = [
     'pid' => getmypid(),
     'status' => 'running',
     'node' => null,
-    'started' => gmdate('c'),
+    'started' => date('c'),
 ];
 $save = static function () use (&$status, $write, $runs, $name): void {
     $write("$runs/$name.json", $status);
@@ -99,7 +99,7 @@ try {
         if ($retryAt !== null && (!is_int($retryAt) || $retryAt < 0)) {
             throw new RuntimeException('Invalid checkpoint retry deadline');
         }
-        fwrite(STDERR, "$name: resuming {$saved['node']}\n");
+        fwrite(STDERR, '[' . date('c') . '] ' . "$name: resuming {$saved['node']}\n");
     }
 
     $save();
@@ -113,7 +113,7 @@ try {
             if ($retryAt !== null) {
                 $status['status'] = 'retrying';
                 $status['retry_after_seconds'] = max(0, $retryAt - time());
-                $status['retry_at'] = gmdate('c', $retryAt);
+                $status['retry_at'] = date('c', $retryAt);
                 $save();
 
                 // Preserve the deadline across interruptions and restarts.
@@ -150,7 +150,7 @@ try {
                 $status['retry_error'] = $retry->getMessage();
                 fwrite(
                     STDERR,
-                    "$name: $node: retryable: {$retry->getMessage()}; " .
+                    '[' . date('c') . '] ' . "$name: $node: retryable: {$retry->getMessage()}; " .
                     "retrying in {$retry->retryAfterSeconds}s\n"
                 );
             }
@@ -209,17 +209,17 @@ try {
         throw new RuntimeException('Cannot remove checkpoint');
     }
     $status['status'] = 'done';
-    $status['finished'] = gmdate('c');
+    $status['finished'] = date('c');
     $save();
 } catch (Throwable $error) {
     $status['status'] = 'failed';
     $status['error'] = $error->getMessage();
-    $status['finished'] = gmdate('c');
+    $status['finished'] = date('c');
     try {
         $save();
     } catch (Throwable $ignored) {
     }
-    fwrite(STDERR, "$name: {$error->getMessage()}\n");
+    fwrite(STDERR, '[' . date('c') . '] ' . "$name: {$error->getMessage()}\n");
     exit(1);
 }
 
@@ -228,6 +228,6 @@ fclose($lock);
 
 if ($next !== null) {
     pcntl_exec($next[0], array_slice($next, 1));
-    fwrite(STDERR, "$name: cannot execute {$next[0]}\n");
+    fwrite(STDERR, '[' . date('c') . '] ' . "$name: cannot execute {$next[0]}\n");
     exit(1);
 }
