@@ -16,6 +16,7 @@ trap cleanup EXIT
 
 mkdir -p "$tmp/workflows"
 cp -- "$root/run.php" "$root/status.php" "$tmp/"
+cp -R -- "$root/src" "$tmp/src"
 cp -R -- "$root/workflows/hello" "$tmp/workflows/"
 
 fail() {

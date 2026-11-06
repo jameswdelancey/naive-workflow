@@ -16,6 +16,7 @@ import tempfile
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     shutil.copy2(Path(sys.argv[1]) / "status.php", root / "status.php")
+    shutil.copytree(Path(sys.argv[1]) / "src", root / "src")
     (root / "workflows/demo").mkdir(parents=True)
     (root / "workflows/invalid name").mkdir()
     (root / ".runs").mkdir()

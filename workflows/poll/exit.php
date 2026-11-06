@@ -1,7 +1,16 @@
 <?php
-// Child invocations can request one iteration; ordinary polling still self-chains.
-if (getenv('POLL_ONCE') === '1') {
-    return null;
-}
+declare(strict_types=1);
 
-return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', basename(__DIR__)];
+require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+
+return (new class extends \NaiveWorkflow\HandoffNode {
+    protected function shouldHandoff(array $state): bool
+    {
+        return !$this->enabled('POLL_ONCE');
+    }
+
+    protected function workflow(): string
+    {
+        return basename(__DIR__);
+    }
+})->run($state);

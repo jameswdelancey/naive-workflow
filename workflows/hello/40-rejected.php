@@ -1,3 +1,11 @@
 <?php
-$state['result'] = 'rejected';
-fwrite(STDERR, '[' . date('c') . '] ' . "{$state['name']}: rejected branch.\n");
+declare(strict_types=1);
+
+require_once __DIR__ . '/ResultNode.php';
+
+return (new class extends \NaiveWorkflow\Hello\ResultNode {
+    protected function result(): string
+    {
+        return 'rejected';
+    }
+})->run($state);

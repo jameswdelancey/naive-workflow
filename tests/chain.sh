@@ -16,6 +16,7 @@ source = Path(sys.argv[1])
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     shutil.copy2(source / "run.php", root / "run.php")
+    shutil.copytree(source / "src", root / "src")
     shutil.copytree(source / "workflows/hello", root / "workflows/hello")
     shutil.copytree(source / "workflows/poll", root / "workflows/poll")
 

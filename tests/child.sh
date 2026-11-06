@@ -15,6 +15,7 @@ with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     source = Path(sys.argv[1])
     shutil.copy2(source / "run.php", root / "run.php")
+    shutil.copytree(source / "src", root / "src")
     for name in ("hello", "poll"):
         shutil.copytree(source / f"workflows/{name}", root / f"workflows/{name}")
     env = dict(os.environ, USER="child-test", HELLO_APPROVED="1",

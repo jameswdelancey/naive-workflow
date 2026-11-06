@@ -1,10 +1,21 @@
 <?php
-// Opt in to process replacement; ordinary hello runs still finish and stop.
-if (getenv('HELLO_POLL') !== '1') {
-    return null;
-}
+declare(strict_types=1);
 
-// The runner completes hello, releases its lock, then replaces itself with poll.
-// This is a handoff, not a function call: execution never returns to hello.
-fwrite(STDERR, '[' . date('c') . '] ' . "Handing off to poll.\n");
-return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'poll'];
+require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+
+return (new class extends \NaiveWorkflow\HandoffNode {
+    protected function shouldHandoff(array $state): bool
+    {
+        return $this->enabled('HELLO_POLL');
+    }
+
+    protected function workflow(): string
+    {
+        return 'poll';
+    }
+
+    protected function message(): ?string
+    {
+        return 'Handing off to poll.';
+    }
+})->run($state);

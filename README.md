@@ -49,8 +49,10 @@ an empty array unless it resumes a checkpoint. Successful polling iterations
 also start with an empty state; persist data externally if it must survive
 between iterations.
 
-Write demo messages to stderr using `fwrite(STDERR, ...)`. Throw exceptions
-to signal errors; do not call `exit()` inside nodes.
+Write application diagnostics through inherited `$this->log('message')`
+in node subclasses; do not duplicate timestamp formatting or stderr writes.
+Throw exceptions to signal errors; do not call `exit()` inside nodes.
+See the OOP architecture and node adapter sections below.
 
 An optional `exit.php` runs after the numbered nodes. Explicitly return
 `null` to stop (omitting a return is not equivalent), or return a nonempty
@@ -131,14 +133,20 @@ requested delay and reruns the same node. The retry deadline and state remain
 in the checkpoint if the process stops; restarting resumes the wait or retries
 immediately if the deadline has passed.
 
-Retries have no automatic limit. Nodes should manage their own retry budget
-where needed and make external side effects safe to repeat. The workflow lock
-remains held during the wait. Deadlines use wall-clock time, so clock changes
-affect waits; this is not a precise timer.
+Retries have no automatic limit. For migrated automatic retries/restarts,
+follow the durable bounded restart policy in `SKILL.md`: at most three
+automatic retries/restarts per rolling ten minutes, with 5/15/45-second
+backoff and metadata outside checkpoint state. This is migration policy,
+not runner enforcement; hello is only a small retry demonstration.
+Make external effects safe to repeat. The workflow lock remains held during
+the wait. Deadlines use wall-clock time, so clock changes affect waits;
+this is not a precise timer.
 
 ## Conditional paths
 
-Inside a numbered node, select another numbered node using:
+Inside a `Node` subclass, select a numbered node with
+`$this->jump($state['approved'] ? 30 : 50);`.
+Legacy procedural nodes can still use:
 
     global $nextSequence;
     $nextSequence = $state['approved'] ? 30 : 50;
@@ -224,7 +232,7 @@ Hello finishes, logs `Handing off to poll.` on stderr, and starts poll using
 the same PID. Poll then repeats until stopped with Ctrl-C. Without
 `HELLO_POLL=1`, hello's exit node explicitly returns null and stops.
 
-The command returned by hello's exit node is:
+Hello's `HandoffNode` adapter returns the equivalent of:
 
     return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'poll'];
 
@@ -274,28 +282,129 @@ cross-workflow transaction or automatic state/result transfer; child effects
 must be idempotent. Do not call the same workflow, or create a dependency
 cycle that needs a lock held by a waiting ancestor.
 
+## OOP architecture
+
+`run.php` and `status.php` are thin CLI adapters. Both require `src/`.
+`src/bootstrap.php` loads the runtime without executing a workflow.
+
+- `Base::log()` is the shared timestamped stderr writer inherited by `Node`,
+  `Runner` and `StatusCommand`. Use `$this->log('message')` in subclasses,
+  without a timestamp prefix or trailing newline. It escapes embedded CR/LF
+  and appends one newline. PHP's configured `date.timezone` controls the
+  default timestamp. Poll passes its saved timestamp as the second argument.
+  Status tables and JSON remain on stdout. External child output and
+  PHP-engine warnings are not intercepted or reformatted by this logger.
+- `Node::run(array &$state): mixed` receives checkpoint state by reference.
+  Objects, process handles, connections and closures stay local to an attempt,
+  never in `$state`. `enabled()` tests for the exact environment value `1`;
+  `jump()` selects a sequence; `workflowCommand()` builds workflow argv.
+- `Runner::run(string $name): int` returns an exit code for finite runs;
+  successful handoffs replace the process and never return. Locks are released
+  in `finally` on success and failure. Legacy procedural nodes still execute
+  in a limited include scope without the runner's `$this` or local variables.
+- `JsonFileStore` publishes runner snapshots by same-directory rename under
+  the workflow lock. It can be injected into `Runner`; this is not an fsync
+  durability guarantee or a transaction with external effects.
+- `RetryableException` remains a global class, loaded from
+  `src/RetryableException.php`. Use `\RetryableException` in namespaced code.
+- `HandoffNode` has a final `run()` method. Override `workflow()`,
+  `shouldHandoff()`, `message()` and, if needed, `forwardTimezone()`.
+  It returns argv or null; only the runner performs process replacement.
+  Hello and poll do not forward timezone overrides by default.
+- `ManagedChildWorkflowNode` owns the foreground-child lifecycle. Override
+  `workflow()`, `shouldRun()`, `environment()`, `timeoutSeconds()`,
+  `terminationGraceSeconds()`, `completed()` or `completionMessage()` rather
+  than duplicating signal, timeout and reaping code. Defaults are a 30-second
+  timeout and five-second termination grace. It forwards the effective PHP
+  timezone and inherits output streams. It has no automatic failure retries,
+  health supervision or descendant-cleanup guarantee.
+
+Hello and poll use OOP node adapters. Hello's workflow-local `ResultNode`
+shares branch behavior, and `ChildPollNode` configures the managed poll child.
+Poll still uses a five-second sleep and optional self-handoff; it is not a
+production scheduler or graceful-shutdown controller.
+
+Mes-observe uses workflow-local `ObservationNode` and `PollRecordNode`.
+Production and quality subclasses supply their table and self-branch sequence.
+The protected `readRecords()` hook delegates to the existing read-only PDO
+adapter; decimal revision helpers remain in `common.php`. Configuration,
+deadline and signal checks surround reads. Unchanged records use paced
+branches, not failure retries. Read/configuration failures stop immediately.
+Its receipt uses a unique temporary file, complete-write check and cleanup.
+See `workflows/mes-observe/README.md` before adapting its observe-only behavior.
+
+## Node adapters
+
+Use a small numbered adapter for new nodes; for example:
+
+    <?php
+    declare(strict_types=1);
+
+    require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+
+    return (new class extends \NaiveWorkflow\Node {
+        public function run(array &$state): mixed
+        {
+            $state['visits'] = ($state['visits'] ?? 0) + 1;
+            $this->log('Visit ' . $state['visits']);
+            return null;
+        }
+    })->run($state);
+
+Anonymous subclasses can be included again during retries or jumps. Put named
+classes in non-numbered helper files and load them with `require_once`.
+Adapters must return `run()`'s result, especially for `exit.php`. Returning
+null from a numbered node means ordinary success/fall-through, not workflow
+completion. Keep common execution in base classes and override only the
+configuration or hooks that differ. Preserve checkpoint filenames and state
+schemas when refactoring workflows that may have saved runs.
+
 ## Tests
 
-From the repository directory, run the bounded test suite:
+Run the bounded regression suite from the repository directory:
 
-    timeout 30s bash tests/retry.sh &&
+    timeout 15s bash tests/logging.sh &&
     timeout 30s bash tests/status.sh &&
+    timeout 30s bash tests/runner.sh &&
+    timeout 30s bash tests/oop.sh &&
+    timeout 15s bash tests/templates.sh &&
+    timeout 30s bash tests/retry.sh &&
     timeout 40s bash tests/chain.sh &&
-    timeout 50s bash tests/child.sh
+    timeout 50s bash tests/child.sh &&
+    timeout 20s bash tests/mes-oop.sh &&
+    timeout 40s bash tests/mes-observe.sh
 
-Tests use temporary workflow copies rather than modifying live checkpoints.
-The test harnesses require Bash, PHP and Python 3; handoff and child examples
-also require the relevant pcntl functions and enabled process functions.
+Tests use isolated temporary copies. Copy `src/` alongside either CLI entry
+point and copy the required workflow directories, including non-numbered
+helper files. Never delete live checkpoints or run an unattended infinite
+poller for a test. Harnesses require Bash, PHP and Python 3; child/handoff
+tests require enabled process and pcntl functions. MES signal checks also
+use the PHP POSIX extension. Fake MES adapters do not require a live database.
 
-- `retry.sh`: both hello branches, retry status/state, a wait observation,
-  completion and timestamped stderr-only demo output.
-- `status.sh`: status states, invalid metadata, JSON/diagnostic separation,
-  retry deadlines and the file snapshot timestamp.
-- `chain.sh`: handoff ordering, same PID, completion and default stop.
-  It replaces only the copied poll exit node with a finite return.
-- `child.sh`: actual finite poll mode, distinct PIDs, parent continuation,
-  child reaping and child-failure propagation.
+- `logging.sh`: shared base logger, single application stderr writer,
+  non-UTC timestamps, escaped multiline diagnostics and clean status JSON.
+- `status.sh`: status states, validation, retry deadlines and snapshot mtime.
+- `runner.sh`: reusable runner, legacy include scope, failure checkpoints,
+  lock release/contention and injected storage failures.
+- `oop.sh`: state references, ordinary resume versus retry mutations,
+  selector reset, branching and child configuration hooks.
+- `templates.sh`: shared result actions, repeated inclusion, exact mode flags
+  and handoff argv configuration without process replacement.
+- `retry.sh`: both hello branches, retry state/status, observed wait,
+  final cleanup and timestamped stderr-only hello/poll output.
+- `chain.sh`: actual handoff ordering, same PID, completion and default stop;
+  only the copied poll exit node is replaced to make the fixture finite.
+- `child.sh`: real finite poll child, distinct PIDs, parent continuation,
+  reaping and child-failure propagation.
+- `mes-oop.sh`: polling hooks, paced branches, revision validation,
+  read/configuration/deadline failures and scoped signal restoration.
+- `mes-observe.sh`: fake-adapter inserts/updates, sequential observations,
+  large revisions, deadline persistence, SIGTERM/resume and receipt creation.
 
-These tests do not establish comprehensive signal, timeout, crash-recovery
-or descendant-cleanup coverage. Add application-specific tests before using
-the child pattern for a service. See `SKILL.md` for migration guidance.
+These tests do not establish live MySQL connectivity, SQL permissions,
+network timeout behavior, comprehensive child signal/timeout or descendant
+cleanup, crash durability, durable retry budgets, or cron/DST correctness.
+Add application-specific coverage and report which tests actually ran.
+
+See `SKILL.md` for migration policy, controller patterns and additional
+application-specific verification requirements.

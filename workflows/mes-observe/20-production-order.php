@@ -1,4 +1,16 @@
 <?php
-require_once __DIR__ . '/common.php';
+declare(strict_types=1);
 
-mes_poll($state, 'mes_production_orders', 20);
+require_once __DIR__ . '/PollRecordNode.php';
+
+return (new class extends \NaiveWorkflow\MesObserve\PollRecordNode {
+    protected function table(): string
+    {
+        return 'mes_production_orders';
+    }
+
+    protected function sequence(): int
+    {
+        return 20;
+    }
+})->run($state);

@@ -74,7 +74,8 @@ PDO connection timeout is five seconds, mysqlnd read timeout five seconds,
 and MySQL SELECT execution limit two seconds. These are operation timeouts,
 not a hard end-to-end network or DNS deadline.
 
-Diagnostics go to stderr. Check progress with `php status.php --json`.
+Diagnostics use inherited `Base::log()` and go to timestamped stderr.
+Check progress with `php status.php --json`.
 Completion overwrites `.runs/mes-observe/last-observation.json`; it is a latest
 receipt, not durable event history, and is not transactionally coupled to the
 runner checkpoint. Atomic rename does not guarantee survival of power loss.
@@ -101,9 +102,37 @@ exactly-once event-processing system.
 
 ## Tests
 
-Run `timeout 30s bash tests/mes-observe.sh`.
+Run `timeout 40s bash tests/mes-observe.sh`.
 Tests use an isolated runner copy and a deterministic fake record adapter.
 They cover preexisting rows, inserts, unchanged rows, sequential completion,
 large revision values, deadline persistence, interruption/resume, stderr-only
 output and receipt creation. They do not establish live MySQL connectivity,
 SQL permissions, network timeout behavior or production CDC guarantees.
+
+## OOP structure
+
+Numbered files now invoke node subclasses while keeping the same filenames,
+checkpoint state and sequence numbers. `ObservationNode` centralizes
+configuration validation, deadline checks, scoped signal handling and paced
+record polling. `PollRecordNode` supplies the final polling execution method;
+production-order and quality-check subclasses override only the table and
+self-branch sequence.
+
+The protected `readRecords()` method is the adapter boundary for specialized
+subclasses and isolated tests. Its default implementation delegates to the
+existing read-only PDO adapter. Configuration, deadline and signal checks
+surround reads just as before. The record models remain unchanged; decimal
+revision validation and comparison remain in `common.php`.
+
+Receipt publication retains its unique temporary file, complete-write check
+and cleanup. This iteration does not change SQL, credentials, transaction
+semantics, observation ordering, resume behavior or failure retry policy.
+
+Additional isolated checks:
+
+    timeout 20s bash tests/mes-oop.sh
+
+They cover overridden record reads, paced unchanged branches, successful
+observations, version regressions, read failures, configuration and deadline
+guards, and restoration of signal handlers/async mode after success, failure
+and a handled SIGTERM. No database connection is made.

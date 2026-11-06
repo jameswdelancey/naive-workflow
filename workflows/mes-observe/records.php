@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/common.php';
+
 // Minimal read-only Active Record mapping; no third-party ORM is assumed.
 abstract class MesActiveRecord
 {

@@ -13,6 +13,7 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$temporary/workflows"
 cp "$root/run.php" "$temporary/run.php"
+cp -R "$root/src" "$temporary/src"
 cp -R "$root/workflows/mes-observe" "$temporary/workflows/"
 cat > "$temporary/workflows/mes-observe/records.php" <<'PHP'
 <?php
