@@ -11,7 +11,7 @@ abstract class HandoffNode extends Node
 {
     abstract protected function workflow(): string;
 
-    protected function shouldHandoff(array $state): bool
+    protected function shouldHandoff(\NaiveWorkflow\WorkflowState $state): bool
     {
         return true;
     }
@@ -26,7 +26,7 @@ abstract class HandoffNode extends Node
         return null;
     }
 
-    final public function run(array &$state): mixed
+    final public function run(\NaiveWorkflow\WorkflowState $state): mixed
     {
         if (!$this->shouldHandoff($state)) {
             return null;

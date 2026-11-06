@@ -50,7 +50,8 @@ foreach ([
     }
 }
 
-$state = [];
+require __DIR__ . '/workflows/poll/State.php';
+$state = new \NaiveWorkflow\Poll\State();
 require __DIR__ . '/workflows/poll/10-tick.php';
 echo json_encode($state, JSON_THROW_ON_ERROR), "\n";
 ''')

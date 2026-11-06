@@ -25,41 +25,40 @@ function check(bool $condition, string $message): void
     }
 }
 
-function invoke(string $path, array &$state): mixed
+function invoke(string $path, \NaiveWorkflow\WorkflowState $state): mixed
 {
     return require $path;
 }
 
-$state = ['name' => 'template-test', 'preserved' => ['value' => 1]];
+require __DIR__ . '/workflows/hello/State.php';
+$state = new \NaiveWorkflow\Hello\State(['name' => 'template-test', 'approved' => false]);
 foreach (['approved' => 50, 'rejected' => null] as $branch => $target) {
     $file = $branch === 'approved' ? '30-approved.php' : '40-rejected.php';
     // Repeated inclusion must not redeclare named classes.
     for ($attempt = 0; $attempt < 2; $attempt++) {
-        $GLOBALS['nextSequence'] = null;
-        check(invoke(__DIR__ . "/workflows/hello/$file", $state) === null,
+        $result = invoke(__DIR__ . "/workflows/hello/$file", $state);
+        check($target === null ? $result === null :
+              ($result instanceof \NaiveWorkflow\Jump && $result->sequence === (string) $target),
               'Branch returned an unexpected value');
-        check($state['result'] === $branch, 'Incorrect branch result');
-        check($GLOBALS['nextSequence'] === $target, 'Incorrect continuation');
-        check($state['preserved'] === ['value' => 1], 'Unrelated state changed');
+        check($state->result === $branch, 'Incorrect branch result');
+        check($state->approved === false, 'Unrelated state changed');
     }
 }
 
 foreach ([null, '0', 'true', '01', '1'] as $value) {
     putenv($value === null ? 'HELLO_POLL' : "HELLO_POLL=$value");
     putenv($value === null ? 'POLL_ONCE' : "POLL_ONCE=$value");
-    $before = $state;
-    $GLOBALS['nextSequence'] = null;
+    $before = $state->toArray();
     $command = [PHP_BINARY, __DIR__ . '/run.php', 'poll'];
     $hello = invoke(__DIR__ . '/workflows/hello/exit.php', $state);
     $poll = invoke(__DIR__ . '/workflows/poll/exit.php', $state);
     check($hello === ($value === '1' ? $command : null), 'Hello flag changed');
     check($poll === ($value === '1' ? null : $command), 'Poll flag changed');
-    check($state === $before, 'Handoff changed state');
-    check($GLOBALS['nextSequence'] === null, 'Handoff selected a sequence');
+    check($state->toArray() === $before, 'Handoff changed state');
 }
 
 $disabled = new class extends \NaiveWorkflow\HandoffNode {
-    protected function shouldHandoff(array $state): bool { return false; }
+    protected function shouldHandoff(\NaiveWorkflow\WorkflowState $state): bool { return false; }
     protected function workflow(): string {
         throw new RuntimeException('Disabled handoff resolved target');
     }

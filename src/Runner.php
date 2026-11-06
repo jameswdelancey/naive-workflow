@@ -30,11 +30,24 @@ class Runner extends Base
      * Preserve the original isolated include scope: scripts receive state,
      * not the Runner's local variables or $this.
      */
-    protected function executeNode(string $file, array &$state): mixed
+    protected function executeNode(string $file, \NaiveWorkflow\WorkflowState $state): mixed
     {
-        return (static function (string $file, array &$state): mixed {
+        return (static function (string $file, \NaiveWorkflow\WorkflowState $state): mixed {
             return require $file;
         })($file, $state);
+    }
+
+    /** Non-numbered state.php optionally returns a WorkflowState subclass name. */
+    protected function createState(string $directory, array $values): WorkflowState
+    {
+        $file = $directory . '/state.php';
+        $class = is_file($file)
+            ? (static function (string $file): mixed { return require $file; })($file)
+            : EmptyWorkflowState::class;
+        if (!is_string($class) || !is_a($class, WorkflowState::class, true)) {
+            throw new RuntimeException('state.php must return a WorkflowState class name');
+        }
+        return new $class($values);
     }
 
     /** Returns a CLI exit code; a successful process handoff never returns. */
@@ -55,91 +68,56 @@ class Runner extends Base
         }
 
         // Hold a nonblocking exclusive lock throughout execution, including retry waits.
-        $lock = fopen("$runs/$name.lock", 'c');
-        if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
-            if (is_resource($lock)) {
-                fclose($lock);
-            }
+        $lock = new WorkflowLock("$runs/$name.lock");
+        if (!$lock->acquire()) {
             $this->log("$name: already running or cannot acquire lock");
             return 1;
         }
 
         try {
             $write = [$this->store, 'write'];
-            $include = fn(string $file, array &$state): mixed => $this->executeNode($file, $state);
+            $include = fn(string $file, \NaiveWorkflow\WorkflowState $state): mixed => $this->executeNode($file, $state);
 
             // Checkpoints control resumption; status metadata describes the latest invocation.
-            $checkpoint = "$runs/$name.checkpoint.json";
-            $status = [
-                'pid' => getmypid(),
-                'status' => 'running',
-                'node' => null,
-                'started' => date('c'),
-            ];
-            // Capture status by reference so every save publishes its current contents.
-            $save = static function () use (&$status, $write, $runs, $name): void {
-                $write("$runs/$name.json", $status);
+            $checkpoint = new CheckpointRepository("$runs/$name.checkpoint.json", $this->store);
+            $status = WorkflowStatus::start();
+            $save = static function () use ($status, $write, $runs, $name): void {
+                $write("$runs/$name.json", $status->toArray());
             };
 
             // Start fresh unless a checkpoint restores state and a retry deadline.
-            $state = [];
+            $state = null;
             $next = null;
             $retryAt = null;
             try {
-                // Discover numbered nodes and sort lexicographically, not numerically.
-                $nodes = glob("$dir/[0-9]*.php") ?: [];
-                sort($nodes, SORT_STRING);
-                $steps = array_map('basename', $nodes);
-                // Run the optional process-handoff node after the numbered nodes.
-                if (is_file("$dir/exit.php")) {
-                    $steps[] = 'exit.php';
-                }
+                $definition = new WorkflowDefinition($dir);
+                $steps = $definition->steps;
 
                 // Resume the saved node rather than replaying earlier completed nodes.
                 $start = 0;
-                if (is_file($checkpoint)) {
-                    $saved = json_decode(
-                        file_get_contents($checkpoint),
-                        true,
-                        512,
-                        JSON_THROW_ON_ERROR
-                    );
-                    // Reject malformed checkpoint data instead of silently starting over.
-                    if (!is_array($saved) ||
-                        !is_string($saved['node'] ?? null) ||
-                        !is_array($saved['state'] ?? null)) {
-                        throw new RuntimeException('Invalid checkpoint');
-                    }
-                    $status['node'] = $saved['node'];
-                    $start = array_search($saved['node'], $steps, true);
-                    // Refuse to resume if workflow edits removed or renamed the saved node.
-                    if ($start === false) {
-                        throw new RuntimeException("Checkpoint node is missing: {$saved['node']}");
-                    }
-                    $state = $saved['state'];
+                $saved = $checkpoint->load();
+                if ($saved !== null) {
+                    $status->selectNode($saved['node']);
+                    $start = $definition->positionOf($saved['node']);
+
                     // Retry deadlines are absolute Unix timestamps, independent of display timezone.
-                    $retryAt = $saved['retry_at'] ?? null;
-                    if ($retryAt !== null && (!is_int($retryAt) || $retryAt < 0)) {
-                        throw new RuntimeException('Invalid checkpoint retry deadline');
-                    }
+                    $retryAt = $checkpoint->retryDeadline($saved);
                     $this->log("$name: resuming {$saved['node']}");
                 }
 
+                $state = $this->createState($dir, $saved['state'] ?? []);
                 $save();
                 // Execute nodes in order unless a successful node chooses a different position.
                 for ($position = $start; $position < count($steps); $position++) {
                     $node = $steps[$position];
-                    $GLOBALS['nextSequence'] = null;
-                    $status['node'] = $node;
+                    $status->selectNode($node);
                     $save();
 
                     // Repeat only this node on retryable exceptions; there is no built-in retry budget.
                     while (true) {
                         // Publish the waiting state and honor a new or restored deadline.
                         if ($retryAt !== null) {
-                            $status['status'] = 'retrying';
-                            $status['retry_after_seconds'] = max(0, $retryAt - time());
-                            $status['retry_at'] = date('c', $retryAt);
+                            $status->retrying($retryAt);
                             $save();
 
                             // Preserve the deadline across interruptions and restarts.
@@ -150,18 +128,12 @@ class Runner extends Base
                             $retryAt = null;
                         }
 
-                        // Clear retry diagnostics and branch selection before each attempt.
-                        $status['status'] = 'running';
-                        unset(
-                            $status['retry_after_seconds'],
-                            $status['retry_at'],
-                            $status['retry_error']
-                        );
+                        // Clear retry diagnostics before each attempt; branch results are local.
+                        $status->running();
                         $save();
-                        $GLOBALS['nextSequence'] = null;
 
                         // Ordinary failures retain the input state of this attempt.
-                        $write($checkpoint, ['node' => $node, 'state' => $state]);
+                        $checkpoint->save($node, $state);
                         try {
                             // A normal return ends the retry loop; ordinary exceptions propagate outward.
                             $result = $include("$dir/$node", $state);
@@ -172,12 +144,8 @@ class Runner extends Base
                             $retryAt = $retry->retryAfterSeconds === 0
                                 ? time()
                                 : (int) ceil(microtime(true) + $retry->retryAfterSeconds);
-                            $write($checkpoint, [
-                                'node' => $node,
-                                'state' => $state,
-                                'retry_at' => $retryAt,
-                            ]);
-                            $status['retry_error'] = $retry->getMessage();
+                            $checkpoint->save($node, $state, $retryAt);
+                            $status->retryError($retry->getMessage());
                             $this->log(
                                 "$name: $node: retryable: {$retry->getMessage()}; " .
                                 "retrying in {$retry->retryAfterSeconds}s"
@@ -185,76 +153,29 @@ class Runner extends Base
                         }
                     }
 
-                    // Only exit.php's return value is interpreted as a process-replacement command.
-                    if ($node === 'exit.php') {
-                        $next = $result;
-                        // Null means stop; otherwise require a nonempty string argv list and executable.
-                        if ($next !== null) {
-                            if (!is_array($next) || !array_is_list($next) || !$next ||
-                                count(array_filter($next, 'is_string')) !== count($next) ||
-                                !str_starts_with($next[0], '/') || !is_executable($next[0])) {
-                                throw new RuntimeException(
-                                    'exit.php must return null or an argv array with an absolute executable path'
-                                );
-                            }
-                            // Check process-replacement support before marking the workflow complete.
-                            if (!function_exists('pcntl_exec')) {
-                                throw new RuntimeException('Process replacement requires pcntl_exec');
-                            }
-                        }
-                    }
-
-                    // Apply branching only after successful execution, never after a retry request.
-                    $target = $GLOBALS['nextSequence'] ?? null;
-                    if ($target !== null) {
-                        // The final handoff node cannot jump back into the numbered workflow.
+                    // One branch API: a successfully returned Jump result.
+                    if ($result instanceof Jump) {
                         if ($node === 'exit.php') {
-                            throw new RuntimeException('nextSequence cannot be set by exit.php');
+                            throw new RuntimeException('exit.php cannot return a Jump');
                         }
-                        // Accept nonnegative integers or digit strings, not arbitrary filenames.
-                        if ((!is_int($target) && !is_string($target)) ||
-                            !preg_match('/^[0-9]+$/D', (string) $target)) {
-                            throw new RuntimeException('nextSequence must be a nonnegative integer or digit string');
-                        }
-
-                        // Compare digit strings without integer conversion; leading zeroes do not matter.
-                        $normalize = static fn(string $value): string => ltrim($value, '0') ?: '0';
-                        $matches = [];
-                        foreach ($steps as $index => $candidate) {
-                            if (preg_match('/^([0-9]+)/', $candidate, $match) &&
-                                $normalize($match[1]) === $normalize((string) $target)) {
-                                $matches[] = $index;
-                            }
-                        }
-                        // Missing or ambiguous sequence numbers are errors, not fall-through.
-                        if (count($matches) !== 1) {
-                            throw new RuntimeException("nextSequence $target must identify exactly one numbered node");
-                        }
-                        // Compensate for the for-loop increment so the next iteration lands on the target.
-                        $position = $matches[0] - 1;
+                        $position = $definition->resolve($result->sequence) - 1;
+                    } elseif ($node === 'exit.php') {
+                        $next = $result === null ? null : new HandoffCommand($result);
                     }
 
                     // Persist the selected next node and its input state before continuing.
                     if (isset($steps[$position + 1])) {
-                        $write($checkpoint, [
-                            'node' => $steps[$position + 1],
-                            'state' => $state,
-                        ]);
+                        $checkpoint->save($steps[$position + 1], $state);
                     }
                 }
 
                 // Successful completion removes resumable state before publishing done.
-                if (is_file($checkpoint) && !unlink($checkpoint)) {
-                    throw new RuntimeException('Cannot remove checkpoint');
-                }
-                $status['status'] = 'done';
-                $status['finished'] = date('c');
+                $checkpoint->remove();
+                $status->complete();
                 $save();
             } catch (Throwable $error) {
                 // Report failure without deleting any remaining checkpoint; external effects stay applied.
-                $status['status'] = 'failed';
-                $status['error'] = $error->getMessage();
-                $status['finished'] = date('c');
+                $status->fail($error);
                 try {
                     $save();
                 } catch (Throwable $ignored) {
@@ -266,15 +187,14 @@ class Runner extends Base
         } finally {
             // Release on success and failure, including repeated in-process invocations.
             // A self-handoff must acquire its own lock after this one is released.
-            flock($lock, LOCK_UN);
-            fclose($lock);
+            $lock->release();
         }
 
         // Replace this process without spawning a child. Success never returns here.
         // If replacement fails, the workflow is already done and its checkpoint is gone.
         if ($next !== null) {
-            pcntl_exec($next[0], array_slice($next, 1));
-            $this->log("$name: cannot execute {$next[0]}");
+            $next->execute();
+            $this->log("$name: cannot execute {$next->executable()}");
             return 1;
         }
         return 0;

@@ -30,7 +30,7 @@ abstract class ManagedChildWorkflowNode extends Node
         return 5;
     }
 
-    protected function completed(array &$state): void
+    protected function completed(\NaiveWorkflow\WorkflowState $state): void
     {
     }
 
@@ -39,7 +39,7 @@ abstract class ManagedChildWorkflowNode extends Node
         return 'Child workflow ' . $this->workflow() . ' completed.';
     }
 
-    final public function run(array &$state): mixed
+    final public function run(\NaiveWorkflow\WorkflowState $state): mixed
     {
         if (!$this->shouldRun()) {
             return null;

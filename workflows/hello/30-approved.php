@@ -9,8 +9,9 @@ return (new class extends \NaiveWorkflow\Hello\ResultNode {
         return 'approved';
     }
 
-    protected function nextSequence(): int|string|null
+    public function run(\NaiveWorkflow\WorkflowState $state): mixed
     {
-        return 50;
+        parent::run($state);
+        return \NaiveWorkflow\Jump::to(50);
     }
 })->run($state);

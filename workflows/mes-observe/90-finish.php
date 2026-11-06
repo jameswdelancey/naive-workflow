@@ -4,10 +4,11 @@ declare(strict_types=1);
 require_once __DIR__ . '/ObservationNode.php';
 
 return (new class extends \NaiveWorkflow\MesObserve\ObservationNode {
-    public function run(array &$state): mixed
+    public function run(\NaiveWorkflow\WorkflowState $state): mixed
     {
+        $state = \NaiveWorkflow\MesObserve\State::requireState($state);
         foreach (['mes_production_orders', 'mes_quality_checks'] as $table) {
-            if (!isset($state['observed'][$table])) {
+            if ($state->observed->record($table) === null) {
                 throw new RuntimeException("Missing observation for $table");
             }
         }
@@ -19,10 +20,10 @@ return (new class extends \NaiveWorkflow\MesObserve\ObservationNode {
             throw new RuntimeException('Cannot create observation receipt directory');
         }
         $receipt = [
-            'unit_id' => $state['config']['unit_id'],
-            'armed_at' => $state['armed_at'],
-            'baseline' => $state['baseline'],
-            'observed' => $state['observed'],
+            'unit_id' => $state->config->unitId,
+            'armed_at' => $state->armedAt,
+            'baseline' => $state->baseline->toArray(),
+            'observed' => $state->observed->toArray(),
             'completed_at' => date('c'),
         ];
         $temporary = tempnam($directory, '.receipt-');

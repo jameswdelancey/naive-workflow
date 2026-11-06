@@ -1,12 +1,13 @@
 <?php
 declare(strict_types=1);
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+require_once __DIR__ . '/State.php';
 
 return (new class extends \NaiveWorkflow\Node {
-    public function run(array &$state): mixed
+    public function run(\NaiveWorkflow\WorkflowState $state): mixed
     {
-        $this->log("Finished for {$state['name']}: {$state['result']}.");
+        $state = \NaiveWorkflow\Hello\State::requireState($state);
+        $this->log("Finished for {$state->name}: {$state->result}.");
         return null;
     }
 })->run($state);

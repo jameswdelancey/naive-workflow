@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory() as temporary:
     shutil.copytree(source / "workflows/mes-observe", root / "workflows/mes-observe")
     (root / "check.php").write_text(r'''<?php
 declare(strict_types=1);
-require __DIR__ . '/workflows/mes-observe/PollRecordNode.php';
+require __DIR__ . '/workflows/mes-observe/ObservationNode.php';
 
 function check(bool $condition, string $message): void
 {
@@ -36,20 +36,23 @@ function failure(callable $work, string $expected): void
     throw new RuntimeException("Expected failure: $expected");
 }
 
-final class TestObserver extends \NaiveWorkflow\MesObserve\PollRecordNode
+final class TestObserver extends \NaiveWorkflow\MesObserve\ObservationNode
 {
     public array $calls = [];
     public ?array $record = null;
     public bool $failRead = false;
     public bool $interrupt = false;
 
-    protected function table(): string { return 'mes_production_orders'; }
-    protected function sequence(): int { return 20; }
-
-    public function initialState(): array
+    public function run(\NaiveWorkflow\WorkflowState $state): mixed
     {
-        return [
-            'config' => $this->configuration(),
+        return $this->poll($state, 'mes_production_orders')
+            ? null : \NaiveWorkflow\Jump::to(20);
+    }
+
+    public function initialState(): \NaiveWorkflow\WorkflowState
+    {
+        return new \NaiveWorkflow\MesObserve\State([
+            'config' => $this->configuration()->toArray(),
             'deadline' => time() + 30,
             'baseline' => ['mes_production_orders' => [
                 'unit_id' => 'UNIT-TEST',
@@ -57,7 +60,7 @@ final class TestObserver extends \NaiveWorkflow\MesObserve\PollRecordNode
                 'status' => 'existing',
             ]],
             'observed' => [],
-        ];
+        ]);
     }
 
     protected function readRecords(array $tables, string $id): array
@@ -85,11 +88,10 @@ pcntl_async_signals(false);
 try {
     foreach (['unchanged', 'changed', 'regression', 'read-failure', 'interrupted'] as $mode) {
         $state = $observer->initialState();
-        $before = $state;
-        $observer->record = $state['baseline']['mes_production_orders'];
+        $before = $state->toArray();
+        $observer->record = $state->baseline->production->toArray();
         $observer->failRead = $mode === 'read-failure';
         $observer->interrupt = $mode === 'interrupted';
-        $GLOBALS['nextSequence'] = null;
 
         if ($mode === 'changed') {
             $observer->record['row_version'] = '9007199254740993';
@@ -107,18 +109,17 @@ try {
             failure(function () use ($observer, &$state): void {
                 $observer->run($state);
             }, $expected);
-            check($state === $before, 'Failed poll mutated state');
-            check($GLOBALS['nextSequence'] === null, 'Failed poll selected a branch');
+            check($state->toArray() === $before, 'Failed poll mutated state');
         } else {
-            check($observer->run($state) === null, 'Unexpected return value');
+            $result = $observer->run($state);
             if ($mode === 'unchanged') {
+                check($result instanceof \NaiveWorkflow\Jump && $result->sequence === '20', 'Missing self-branch');
                 check(hrtime(true) - $start >= 1_000_000_000, 'Unchanged poll did not wait');
-                check($state === $before, 'Unchanged poll mutated state');
-                check($GLOBALS['nextSequence'] === 20, 'Missing paced self-branch');
+                check($state->toArray() === $before, 'Unchanged poll mutated state');
             } else {
-                check($state['observed']['mes_production_orders']['record'] === $observer->record,
+                check($result === null, 'Changed poll did not continue');
+                check($state->observed->production->record->toArray() === $observer->record,
                       'Changed record not preserved');
-                check($GLOBALS['nextSequence'] === null, 'Changed poll did not continue');
             }
         }
 
@@ -143,7 +144,7 @@ try {
     check(count($observer->calls) === 5, 'Changed configuration queried records');
     putenv('MES_UNIT_ID=UNIT-TEST');
 
-    $state['deadline'] = time() - 1;
+    $state->deadline = time() - 1;
     failure(function () use ($observer, &$state): void {
         $observer->run($state);
     }, 'Observation deadline expired');

@@ -1,13 +1,14 @@
 <?php
 declare(strict_types=1);
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+require_once __DIR__ . '/State.php';
 
 return (new class extends \NaiveWorkflow\Node {
-    public function run(array &$state): mixed
+    public function run(\NaiveWorkflow\WorkflowState $state): mixed
     {
-        $state['name'] = getenv('USER') ?: 'world';
-        $this->log("Hello, {$state['name']}!");
+        $state = \NaiveWorkflow\Hello\State::requireState($state);
+        $state->name = getenv('USER') ?: 'world';
+        $this->log("Hello, {$state->name}!");
         return null;
     }
 })->run($state);

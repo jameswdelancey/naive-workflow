@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
 
 return (new class extends \NaiveWorkflow\HandoffNode {
-    protected function shouldHandoff(array $state): bool
+    protected function shouldHandoff(\NaiveWorkflow\WorkflowState $state): bool
     {
         return !$this->enabled('POLL_ONCE');
     }

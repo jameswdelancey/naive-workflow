@@ -22,7 +22,7 @@ it for a health supervisor or durable restart controller.
 - Create `workflows/<name>/`; names must match `[a-zA-Z0-9_-]+`.
   Numbered nodes run in lexicographic order, not numeric order. Use consistently
   padded prefixes and unique leading sequence numbers.
-- Nodes share `$state` by reference; use JSON-compatible values. Resolve
+- Nodes share a `WorkflowState` object; use JSON-compatible values. Resolve
   adapter paths via `__DIR__` and repository paths via `$this->root` in nodes.
 - Use inherited `$this->log('message')` for application diagnostics. Do not
   add timestamps/newlines or duplicate stderr writers. `Base::log()` uses
@@ -59,14 +59,63 @@ it for a health supervisor or durable restart controller.
   default timestamp. Poll passes its saved timestamp as the second argument.
   Status tables and JSON remain on stdout. External child output and
   PHP-engine warnings are not intercepted or reformatted by this logger.
-- `Node::run(array &$state): mixed` receives checkpoint state by reference.
+- `Node::run(WorkflowState $state): mixed` receives shared mutable state.
   Objects, process handles, connections and closures stay local to an attempt,
   never in `$state`. `enabled()` tests for the exact environment value `1`;
-  `jump()` selects a sequence; `workflowCommand()` builds workflow argv.
+  `Jump::to()` creates a returned branch result; `workflowCommand()` builds workflow argv.
 - `Runner::run(string $name): int` returns an exit code for finite runs;
   successful handoffs replace the process and never return. Locks are released
-  in `finally` on success and failure. Legacy procedural nodes still execute
+  in `finally` on success and failure. Procedural nodes still execute
   in a limited include scope without the runner's `$this` or local variables.
+  They now receive a state object: typed workflows require named properties;
+  array-only
+  type hints, array functions and whole-state replacement must be migrated.
+- `WorkflowState` is an abstract serialization contract that rejects unknown
+  properties. All shipped workflows declare typed fields in their `State` classes;
+  their nodes use named properties, not runtime-inserted keys. Constructors
+  explicitly validate known checkpoint fields without scalar coercion.
+  Missing fields retain their absence in checkpoints; false values are kept.
+- `State::requireState()` checks and narrows the shared node argument before
+  workflow-specific properties are used. Non-numbered `state.php` returns the
+  class used to hydrate checkpoints. Use `clone` for independent state copies.
+- MES state and its nested configuration, records, baselines and observations
+  now use declared typed fields. The record adapter's arrays are validated and
+  converted immediately at the read boundary. Fixed production/quality slots
+  replace runtime-inserted table keys inside state. JSON field names are retained.
+- Workflows without `state.php` use `EmptyWorkflowState`, which rejects all
+  application fields. Stateful workflows must declare their schema; there is
+  no array-backed fallback or `ArrayAccess` state implementation.
+  Checkpoint writes require a `WorkflowState` object. JSON arrays exist at
+  serialization boundaries, not as an extensible in-memory state bag.
+- Declare `strict_types=1` in node and model files. PHP checks assignments to
+  declared properties, and hydration validates input types and unknown keys.
+  This is a closed runtime state schema, not a claim of whole-program static
+  verification or of application-level invariants beyond the checks shown.
+- `WorkflowStatus` owns execution metadata in declared typed fields, with
+  `ExecutionStatus` enum values for running/retrying/done/failed. It rejects
+  external property creation and unknown input fields. The known `updated_at`
+  input field is ignored; the report uses the snapshot file's mtime instead.
+  Status report rows remain presentation arrays; serialization retains the
+  documented status fields, not arbitrary extra metadata.
+- `WorkflowLock` owns the nonblocking lock handle; `Runner` explicitly releases
+  it in `finally` before any handoff. Release is idempotent; destruction is a
+  fallback, not a replacement for explicit cleanup.
+- `CheckpointRepository` loads, saves and removes checkpoints through the
+  runner's injected `JsonFileStore`. The runner still chooses when to save
+  attempt input versus retry mutations. Resume resolves the saved node before
+  validating its retry deadline, preserving failure status and diagnostics.
+- `HandoffCommand` validates argv and process-replacement support before
+  completion. Its execution occurs only after checkpoint removal, done status
+  publication and lock release. It does not launch a child or restore state
+  on a post-completion launch failure.
+- `WorkflowDefinition` owns the discovered step snapshot, checkpoint-node
+  lookup and sequence resolution. It preserves lexicographic ordering and
+  compares digit strings without integer overflow. It does not execute nodes.
+- `StatusRepository::collect()` returns a `StatusReport` containing rows and
+  read errors without printing; snapshot contents and mtime still use one
+  handle. `StatusFormatter` returns table/JSON strings without printing.
+  `StatusCommand` accepts optional repository/formatter collaborators and
+  handles only diagnostic logging, output selection and the report exit code.
 - `JsonFileStore` publishes runner snapshots by same-directory rename under
   the workflow lock. It can be injected into `Runner`; this is not an fsync
   durability guarantee or a transaction with external effects.
@@ -89,8 +138,8 @@ shares branch behavior, and `ChildPollNode` configures the managed poll child.
 Poll still uses a five-second sleep and optional self-handoff; it is not a
 production scheduler or graceful-shutdown controller.
 
-Mes-observe uses workflow-local `ObservationNode` and `PollRecordNode`.
-Production and quality subclasses supply their table and self-branch sequence.
+Mes-observe uses workflow-local `ObservationNode`.
+Production and quality nodes supply the table and return their self-branch result.
 The protected `readRecords()` hook delegates to the existing read-only PDO
 adapter; decimal revision helpers remain in `common.php`. Configuration,
 deadline and signal checks surround reads. Unchanged records use paced
@@ -100,7 +149,7 @@ See `workflows/mes-observe/README.md` before adapting its observe-only behavior.
 
 # Node adapters
 
-Use a small numbered adapter for new nodes; for example:
+A stateless numbered adapter can use the default `EmptyWorkflowState`:
 
     <?php
     declare(strict_types=1);
@@ -108,13 +157,19 @@ Use a small numbered adapter for new nodes; for example:
     require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
 
     return (new class extends \NaiveWorkflow\Node {
-        public function run(array &$state): mixed
+        public function run(\NaiveWorkflow\WorkflowState $state): mixed
         {
-            $state['visits'] = ($state['visits'] ?? 0) + 1;
-            $this->log('Visit ' . $state['visits']);
+            $this->log('Visited this node');
             return null;
         }
     })->run($state);
+
+For stateful nodes, define typed fields and explicit hydration/serialization
+in a workflow-local `State` subclass. Return its class name from `state.php`,
+load the class with `require_once`, and narrow the argument using
+`State::requireState($state)` before accessing its properties. See hello and
+MES for scalar and nested examples. Declare any stop/retry/schedule fields
+before using them; arbitrary runtime field insertion is rejected.
 
 Anonymous subclasses can be included again during retries or jumps. Put named
 classes in non-numbered helper files and load them with `require_once`.
@@ -132,8 +187,8 @@ schemas when refactoring workflows that may have saved runs.
   retry deadline, reports `retrying`, waits, and reruns the node. A restart
   resumes the saved wait or retries immediately if the deadline has passed.
 - Ordinary failures instead retain the input state for the failed attempt and
-  stop the run. `$nextSequence` takes effect only after successful return and
-  is reset on each attempt.
+  stop the run. A returned Jump takes effect only after successful return;
+  failed attempts do not transfer a branch result.
 - There is no built-in retry limit. Apply the durable bounded policy below;
   checkpointed state alone cannot enforce a budget across fresh runs. Treat
   side effects as potentially repeated and avoid retrying invalid config.
@@ -234,8 +289,12 @@ Run the bounded regression suite from the repository directory:
     timeout 15s bash tests/logging.sh &&
     timeout 30s bash tests/status.sh &&
     timeout 30s bash tests/runner.sh &&
+    timeout 20s bash tests/objects.sh &&
+    timeout 20s bash tests/runner-objects.sh &&
+    timeout 20s bash tests/state-status.sh &&
     timeout 30s bash tests/oop.sh &&
     timeout 15s bash tests/templates.sh &&
+    timeout 15s bash tests/branch-results.sh &&
     timeout 30s bash tests/retry.sh &&
     timeout 40s bash tests/chain.sh &&
     timeout 50s bash tests/child.sh &&
@@ -254,10 +313,18 @@ use the PHP POSIX extension. Fake MES adapters do not require a live database.
 - `status.sh`: status states, validation, retry deadlines and snapshot mtime.
 - `runner.sh`: reusable runner, legacy include scope, failure checkpoints,
   lock release/contention and injected storage failures.
+- `objects.sh`: discovery snapshots, sequence resolution, pure status
+  collection/rendering, partial reports and injected command collaborators.
+- `runner-objects.sh`: lock ownership, checkpoint persistence and validation,
+  injected storage errors, resume validation order and completion-before-handoff.
+- `state-status.sh`: workflow-specific state classes, legacy checkpoint
+  hydration, nested updates, detached snapshots and status transitions.
 - `oop.sh`: state references, ordinary resume versus retry mutations,
-  selector reset, branching and child configuration hooks.
+  discarded retry results, branching and child configuration hooks.
 - `templates.sh`: shared result actions, repeated inclusion, exact mode flags
   and handoff argv configuration without process replacement.
+- `branch-results.sh`: the single returned-Jump API, target failure/resume
+  and rejection of exit-node jumps.
 - `retry.sh`: both hello branches, retry state/status, observed wait,
   final cleanup and timestamped stderr-only hello/poll output.
 - `chain.sh`: actual handoff ordering, same PID, completion and default stop;
@@ -288,16 +355,16 @@ rapid restart loop. Do not infer untested production guarantees from fixtures.
 
 # Conditional paths
 
-- In a `Node` subclass, use `$this->jump($condition ? 30 : 50);`.
-  Legacy procedural nodes may use `global $nextSequence; $nextSequence = 30;`
-  or `$GLOBALS['nextSequence'] = $condition ? 30 : 50;`.
-- Targets must be nonnegative integers or digit strings and match one unique
+- Use only `return \NaiveWorkflow\Jump::to($sequence);` from numbered nodes.
+  The PHP adapter must return the node result. Null means fall-through.
+- Targets are nonnegative integers or digit strings matching one unique
   leading filename number; leading zeroes are ignored.
-- Selection applies after successful return. Unset/null means sequential.
-- The selector resets each attempt; state persists. Branch endpoints must jump
-  over unwanted alternatives. Missing/ambiguous targets fail the current node.
-- Backward/self jumps need explicit bounds and interruptible waits; they do
-  not provide retry backoff. exit.php cannot select a sequence.
+- The runner applies a returned Jump only after successful node execution.
+  Missing/ambiguous targets fail the node. Exceptions discard the result.
+- Returning ends the method: perform required work before the return and
+  mandatory cleanup in finally. A Jump is not a retry request.
+- Bound and pace backward/self branches. exit.php cannot return a Jump.
+- Do not use globals, a jump setter or a next-sequence hook as alternatives.
 
 # Plan conditional paths before migrating
 
@@ -305,13 +372,12 @@ rapid restart loop. Do not infer untested production guarantees from fixtures.
   maintenance due, retry allowed/exhausted, and shutdown requested.
 - Sketch numbered nodes and branch destinations before moving code. Prefer
   small decision nodes over deeply nested conditionals.
-- Use `$this->jump($condition ? 30 : 50);` in node subclasses for real
-  alternatives (or the legacy `$GLOBALS['nextSequence']` selector).
-  No assignment means fall-through, NOT workflow completion.
+- Use `return \NaiveWorkflow\Jump::to($condition ? 30 : 50);` for alternatives.
+  Returning null means fall-through, NOT workflow completion.
 - End each alternative with an explicit jump to the common continuation;
   otherwise it may fall through into the other branch.
 - Reserve a final numbered cleanup node. Route requested stops there; set
-  `$state['stop'] = true` and make exit.php return null when it is set.
+  `$state->stop = true` and make exit.php return null when it is set.
 - Exceptions skip later nodes: mandatory resource cleanup still needs finally.
   A jump takes effect only after successful node return.
 - Checkpoint replay may revisit a decision or action. Re-evaluate volatile
@@ -333,7 +399,7 @@ rapid restart loop. Do not infer untested production guarantees from fixtures.
   decisions, bounded restarts and finally cleanup inside one controller node.
   Live process handles cannot cross checkpointed nodes through $state.
 - Inside that controller, use ordinary PHP conditionals for health, maintenance,
-  retry and stop decisions. nextSequence cannot transfer control until it returns.
+  retry and stop decisions. a Jump cannot transfer control until the node returns.
 
 ## Branch tests
 

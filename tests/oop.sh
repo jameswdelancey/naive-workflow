@@ -14,36 +14,40 @@ with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
     shutil.copy2(source / "run.php", root / "run.php")
     shutil.copytree(source / "src", root / "src")
+    shutil.copy2(source / "tests/fixtures/TestState.php", root / "TestState.php")
     workflow = root / "workflows/demo"
     workflow.mkdir(parents=True)
+    (workflow / "state.php").write_text(
+        "<?php\nrequire_once dirname(__DIR__, 2) . '/TestState.php';\nreturn TestState::class;\n"
+    )
 
     def node(filename, body):
         (workflow / filename).write_text(
             "<?php\n"
             "require_once dirname(__DIR__, 2) . '/src/bootstrap.php';\n"
             "return (new class extends \\NaiveWorkflow\\Node {\n"
-            "public function run(array &$state): mixed {\n"
-            + body + "\n}\n})->run($state);\n"
+            "public function run(\\NaiveWorkflow\\WorkflowState $state): mixed {\n"
+            + "$state = TestState::requireState($state);\n" + body + "\n}\n})->run($state);\n"
         )
 
-    node("10-start.php", "$state['value'] = 7; return null;")
+    node("10-start.php", "$state->value = 7; return null;")
     node("20-work.php", r"""
-        $state['value']++;
+        $state->value++;
         if (!is_file($this->root . '/allow')) {
             throw new \RuntimeException('ordinary failure');
         }
-        if (!isset($state['retried'])) {
-            $state['retried'] = true;
-            $this->jump(999);
+        if (!isset($state->retried)) {
+            $state->retried = true;
+            $discardedResult = \NaiveWorkflow\Jump::to(999);
             throw new \RetryableException('retry with mutation', 0);
         }
-        // Fall through: the unsuccessful attempt's jump must be reset.
+        // Fall through: the unsuccessful attempt's result must be discarded.
         return null;
     """)
-    node("30-choose.php", "$this->jump('0050'); return null;")
+    node("30-choose.php", "return \\NaiveWorkflow\\Jump::to('0050');")
     node("40-unused.php", r"throw new \RuntimeException('Unused branch ran');")
     node("50-finish.php", r"""
-        if ($state !== ['value' => 9, 'retried' => true]) {
+        if ($state->toArray() !== ['value' => 9, 'retried' => true]) {
             throw new \RuntimeException('Unexpected resumed state');
         }
         $this->log('OOP state and branch verified.');
@@ -75,14 +79,15 @@ with tempfile.TemporaryDirectory() as temporary:
     (root / "contracts.php").write_text(r'''<?php
 require __DIR__ . '/src/bootstrap.php';
 
-$state = ['unchanged' => true];
+require __DIR__ . '/TestState.php';
+$state = new TestState(['unchanged' => true]);
 $disabled = new class extends \NaiveWorkflow\ManagedChildWorkflowNode {
     protected function shouldRun(): bool { return false; }
     protected function workflow(): string {
         throw new \RuntimeException('Disabled node resolved its target');
     }
 };
-if ($disabled->run($state) !== null || $state !== ['unchanged' => true]) {
+if ($disabled->run($state) !== null || $state->toArray() !== ['unchanged' => true]) {
     throw new \RuntimeException('Disabled node changed state');
 }
 
@@ -97,7 +102,7 @@ try {
 }
 
 $command = new class extends \NaiveWorkflow\Node {
-    public function run(array &$state): mixed {
+    public function run(\NaiveWorkflow\WorkflowState $state): mixed {
         return $this->workflowCommand('demo', true);
     }
 };

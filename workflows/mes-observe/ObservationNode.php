@@ -8,6 +8,7 @@ use RuntimeException;
 
 require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
 require_once __DIR__ . '/common.php';
+require_once __DIR__ . '/State.php';
 
 /**
  * Shared observation configuration, deadline, signal scope and paced polling.
@@ -25,7 +26,19 @@ abstract class ObservationNode extends \NaiveWorkflow\Node
         return \mes_read_records($tables, $id);
     }
 
-    protected function configuration(): array
+    protected function readSnapshot(array $tables, string $id): Baseline
+    {
+        $snapshot = new Baseline($this->readRecords($tables, $id));
+        foreach ($tables as $table) {
+            $record = $snapshot->record($table);
+            if ($record !== null && $record->unitId !== $id) {
+                throw new RuntimeException('Record belongs to a different manufacturing unit');
+            }
+        }
+        return $snapshot;
+    }
+
+    protected function configuration(): Configuration
     {
         $id = getenv('MES_UNIT_ID');
         if ($id === false || !preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $id)) {
@@ -46,25 +59,26 @@ abstract class ObservationNode extends \NaiveWorkflow\Node
         if (!str_starts_with($dsn, 'mysql:')) {
             throw new InvalidArgumentException('MES_MYSQL_DSN must use mysql');
         }
-        return [
+        return new Configuration([
             'unit_id' => $id,
             'interval' => $integer('MES_POLL_SECONDS', 5, 60),
             'timeout' => $integer('MES_TIMEOUT_SECONDS', 3600, 86400),
             'database_identity' => hash('sha256', $dsn . "\0" . (getenv('MES_MYSQL_USER') ?: 'mes_observer')),
-        ];
+        ]);
     }
 
-    protected function checkObservation(array $state): void
+    protected function checkObservation(\NaiveWorkflow\WorkflowState $state): void
     {
-        if (($state['config'] ?? null) !== $this->configuration()) {
+        $state = State::requireState($state);
+        if (!isset($state->config) || $state->config->toArray() !== $this->configuration()->toArray()) {
             throw new RuntimeException('Configuration differs from checkpoint; restore the original configuration');
         }
-        if (!is_int($state['deadline'] ?? null) || time() >= $state['deadline']) {
+        if (!isset($state->deadline) || time() >= $state->deadline) {
             throw new RuntimeException('Observation deadline expired; checkpoint retained for inspection');
         }
     }
 
-    protected function interruptible(callable $work): void
+    protected function interruptible(callable $work): mixed
     {
         foreach (['pcntl_signal', 'pcntl_signal_get_handler', 'pcntl_async_signals'] as $function) {
             if (!function_exists($function)) {
@@ -88,8 +102,9 @@ abstract class ObservationNode extends \NaiveWorkflow\Node
                 }
             };
             $check();
-            $work($check);
+            $result = $work($check);
             $check();
+            return $result;
         } finally {
             foreach ($handlers as $signal => $handler) {
                 pcntl_signal($signal, $handler);
@@ -98,25 +113,26 @@ abstract class ObservationNode extends \NaiveWorkflow\Node
         }
     }
 
-    protected function poll(array &$state, string $table, int $sequence): void
+    protected function poll(\NaiveWorkflow\WorkflowState $state, string $table): bool
     {
-        $this->interruptible(function (callable $check) use (&$state, $table, $sequence): void {
+        $state = State::requireState($state);
+        return $this->interruptible(function (callable $check) use ($state, $table): bool {
             $this->checkObservation($state);
-            $id = $state['config']['unit_id'];
-            $current = $this->readRecords([$table], $id)[$table];
+            $id = $state->config->unitId;
+            $current = $this->readSnapshot([$table], $id)->record($table);
             $check();
             $this->checkObservation($state);
-            if (mes_changed($state['baseline'][$table], $current)) {
-                $state['observed'][$table] = [
-                    'record' => $current,
+            if (mes_changed($state->baseline->record($table)?->toArray(), $current?->toArray())) {
+                $state->observed->observe($table, new Observation([
+                    'record' => $current->toArray(),
                     'observed_at' => date('c'),
-                ];
-                $this->log("$table: observed $id at revision {$current['row_version']}");
-                return;
+                ]));
+                $this->log("$table: observed $id at revision {$current->rowVersion}");
+                return true;
             }
 
             // No work is a normal branch, not an automatic failure retry.
-            $until = hrtime(true) + $state['config']['interval'] * 1_000_000_000;
+            $until = hrtime(true) + $state->config->interval * 1_000_000_000;
             while (hrtime(true) < $until) {
                 $check();
                 $this->checkObservation($state);
@@ -124,7 +140,7 @@ abstract class ObservationNode extends \NaiveWorkflow\Node
             }
             $check();
             $this->checkObservation($state);
-            $this->jump($sequence);
+            return false;
         });
     }
 }

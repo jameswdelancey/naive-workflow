@@ -14,28 +14,32 @@ with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
     shutil.copy2(source / "run.php", root / "run.php")
     shutil.copytree(source / "src", root / "src")
+    shutil.copy2(source / "tests/fixtures/TestState.php", root / "TestState.php")
     for name in ("legacy", "failure", "scope", "invalidexit", "storage"):
         (root / "workflows" / name).mkdir(parents=True)
+        (root / "workflows" / name / "state.php").write_text(
+            "<?php\nrequire_once dirname(__DIR__, 2) . '/TestState.php';\nreturn TestState::class;\n"
+        )
 
     (root / "workflows/legacy/10-work.php").write_text("""<?php
-$state['value'] = ($state['value'] ?? 0) + 1;
-if ($state['value'] !== 1) {
+$state->value = ($state->value ?? 0) + 1;
+if ($state->value !== 1) {
     throw new RuntimeException('State leaked across runs');
 }
 """)
     (root / "workflows/legacy/exit.php").write_text("<?php\nreturn null;\n")
     (root / "workflows/failure/10-work.php").write_text("""<?php
-$state['discarded'] = true;
+$state->discarded = true;
 throw new RuntimeException('Expected node failure');
 """)
     (root / "workflows/scope/10-work.php").write_text("""<?php
 if (isset($this) || isset($root) || isset($lock) || isset($status)) {
     throw new RuntimeException('Runner scope leaked into a script');
 }
-$state['isolated'] = true;
+$state->isolated = true;
 """)
     (root / "workflows/invalidexit/exit.php").write_text("<?php\n// Missing explicit return.\n")
-    (root / "workflows/storage/10-work.php").write_text("<?php\n$state['ok'] = true;\n")
+    (root / "workflows/storage/10-work.php").write_text("<?php\n$state->ok = true;\n")
 
     (root / "check.php").write_text(r'''<?php
 declare(strict_types=1);

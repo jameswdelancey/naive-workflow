@@ -105,7 +105,7 @@ check_completed approved
 
 printf 'PASS: retry status, checkpointed state, node wait, second attempt, and both hello branches\n'
 
-php -r '$state = []; require $argv[1];' \
+php -r 'require dirname($argv[1]) . "/State.php"; $state = new \NaiveWorkflow\Poll\State(); require $argv[1];' \
     "$root/workflows/poll/10-tick.php" \
     >"$tmp/poll.stdout" 2>"$tmp/poll.log" ||
     fail "poll node failed"

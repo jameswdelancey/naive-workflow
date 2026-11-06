@@ -111,12 +111,12 @@ SQL permissions, network timeout behavior or production CDC guarantees.
 
 ## OOP structure
 
-Numbered files now invoke node subclasses while keeping the same filenames,
+Numbered files invoke node subclasses while keeping the same filenames,
 checkpoint state and sequence numbers. `ObservationNode` centralizes
 configuration validation, deadline checks, scoped signal handling and paced
-record polling. `PollRecordNode` supplies the final polling execution method;
-production-order and quality-check subclasses override only the table and
-self-branch sequence.
+record polling. `poll()` returns whether a change was observed. Production
+and quality nodes return null on a change or `Jump::to()` for a paced
+self-branch, using the same routing API as hello.
 
 The protected `readRecords()` method is the adapter boundary for specialized
 subclasses and isolated tests. Its default implementation delegates to the
@@ -136,3 +136,17 @@ They cover overridden record reads, paced unchanged branches, successful
 observations, version regressions, read failures, configuration and deadline
 guards, and restoration of signal handlers/async mode after success, failure
 and a handled SIGTERM. No database connection is made.
+
+## Typed observation state
+
+`State.php` declares configuration, deadline, baseline, observations and arming
+time as typed properties. `Models.php` declares the nested configuration,
+record and observation schemas. Constructors reject unknown fields and wrong
+types; record versions remain decimal strings. Baseline slots preserve the
+difference between a missing field and a captured null record.
+
+The read adapter still returns arrays at its boundary. `readSnapshot()` converts
+them immediately into typed records and checks the requested unit identity.
+Nodes mutate named fields or fixed production/quality observation slots, never
+insert new state keys. Checkpoint and receipt field names remain unchanged.
+Cloning MES state also clones nested models.

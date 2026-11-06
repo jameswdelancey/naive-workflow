@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 namespace NaiveWorkflow\Hello;
 
-require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+require_once __DIR__ . '/State.php';
 
 final class ChildPollNode extends \NaiveWorkflow\ManagedChildWorkflowNode
 {
@@ -22,9 +22,10 @@ final class ChildPollNode extends \NaiveWorkflow\ManagedChildWorkflowNode
         return ['POLL_ONCE' => '1'];
     }
 
-    protected function completed(array &$state): void
+    protected function completed(\NaiveWorkflow\WorkflowState $state): void
     {
-        $state['child_poll_completed'] = true;
+        $state = \NaiveWorkflow\Hello\State::requireState($state);
+        $state->childPollCompleted = true;
     }
 
     protected function completionMessage(): string

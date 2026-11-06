@@ -17,22 +17,11 @@ abstract class Node extends Base
         $this->root = $resolved;
     }
 
-    abstract public function run(array &$state): mixed;
+    abstract public function run(\NaiveWorkflow\WorkflowState $state): mixed;
 
     protected function enabled(string $variable): bool
     {
         return getenv($variable) === '1';
-    }
-
-    protected function jump(int|string $sequence): void
-    {
-        if (!preg_match('/^[0-9]+$/D', (string) $sequence)) {
-            throw new \InvalidArgumentException(
-                'nextSequence must be a nonnegative integer or digit string'
-            );
-        }
-        // The runner validates the target and applies it only after success.
-        $GLOBALS['nextSequence'] = $sequence;
     }
 
     protected function workflowCommand(string $workflow, bool $forwardTimezone = false): array
