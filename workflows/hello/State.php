@@ -4,6 +4,7 @@ declare(strict_types=1);
 namespace NaiveWorkflow\Hello;
 
 require_once dirname(__DIR__, 2) . '/src/bootstrap.php';
+require_once __DIR__ . '/PollJoinResult.php';
 
 /** Fixed hello schema. Uninitialized fields retain checkpoint absence semantics. */
 final class State extends \NaiveWorkflow\WorkflowState
@@ -13,12 +14,19 @@ final class State extends \NaiveWorkflow\WorkflowState
     public bool $approved;
     public string $result;
     public bool $childPollCompleted;
+    public PollJoinResult $pollJoin;
 
     public function __construct(array $values = [])
     {
         self::rejectUnknown($values, [
-            'name', 'retry_demo_attempts', 'approved', 'result', 'child_poll_completed',
+            'name', 'retry_demo_attempts', 'approved', 'result', 'child_poll_completed', 'poll_join',
         ]);
+        if (array_key_exists('poll_join', $values)) {
+            if (!is_array($values['poll_join'])) {
+                throw new \InvalidArgumentException('Invalid poll join snapshot');
+            }
+            $this->pollJoin = new PollJoinResult($values['poll_join']);
+        }
         if (array_key_exists('name', $values)) {
             if (!is_string($values['name'])) {
                 throw new \InvalidArgumentException('Invalid hello name');
@@ -69,6 +77,9 @@ final class State extends \NaiveWorkflow\WorkflowState
         }
         if (isset($this->childPollCompleted)) {
             $values['child_poll_completed'] = $this->childPollCompleted;
+        }
+        if (isset($this->pollJoin)) {
+            $values['poll_join'] = $this->pollJoin->toArray();
         }
         return $values;
     }

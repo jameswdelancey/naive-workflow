@@ -50,6 +50,16 @@ class Runner extends Base
         return new $class($values);
     }
 
+    protected function runtimeDirectory(): string
+    {
+        return $this->root . '/.runs';
+    }
+
+    /** Called before checkpoint removal; a failure retains resumable state. */
+    protected function completed(WorkflowState $state): void
+    {
+    }
+
     /** Returns a CLI exit code; a successful process handoff never returns. */
     public function run(string $name): int
     {
@@ -62,7 +72,7 @@ class Runner extends Base
 
         // Store checkpoints, status and locks in a private runtime directory.
         $dir = "$root/workflows/$name";
-        $runs = "$root/.runs";
+        $runs = $this->runtimeDirectory();
         if (!is_dir($runs) && !mkdir($runs, 0700, true) && !is_dir($runs)) {
             return 1;
         }
@@ -170,6 +180,7 @@ class Runner extends Base
                 }
 
                 // Successful completion removes resumable state before publishing done.
+                $this->completed($state);
                 $checkpoint->remove();
                 $status->complete();
                 $save();

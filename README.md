@@ -15,7 +15,10 @@ From the repository directory (for example, `cd repos/naive-workflow`):
     php status.php
     php status.php --json
 
-These examples assume optional mode variables are unset unless shown.
+These examples assume mode variables are unset unless shown. Plain
+`php run.php hello` runs one finite poll child, then two concurrent poll
+children and joins their results.
+Use `HELLO_CHILD_POLL=0 php run.php hello` to skip the child.
 For continuous polling, run `POLL_ONCE=0 php run.php poll`.
 
 Stop polling with Ctrl-C. Demo messages and runtime diagnostics go to stderr;
@@ -24,18 +27,21 @@ Stop polling with Ctrl-C. Demo messages and runtime diagnostics go to stderr;
 ## Demo modes
 
 - `HELLO_APPROVED=1`: select hello's approved branch; otherwise reject.
-- `HELLO_CHILD_POLL=1`: run poll as a managed child from `55-child-poll.php`.
+- `HELLO_CHILD_POLL`: unset or `1` runs poll as a managed child from
+  `55-child-poll.php`; `0` skips it. Other explicit values also disable it.
   The child receives `POLL_ONCE=1`; hello waits and then continues.
 - `HELLO_POLL=1`: hand off to poll from hello's `exit.php`. Hello does not return.
 - `POLL_ONCE=1`: stop poll after its current iteration; otherwise self-chain.
 
-Only the exact value `1` enables each option. Child execution and handoff
-are independent: enabling both runs a child first and then hands off.
+The child defaults to enabled when its variable is unset. For explicitly
+set mode variables, only the exact value `1` enables the option.
+Child execution and handoff are independent: enabling handoff with the
+default child mode runs a child first and then hands off.
 An inherited `POLL_ONCE=1` also makes a handoff finite.
 
 Hello's order is greet, retry demo, choose branch, branch action, finish
-message, optional child, then exit/handoff. The finish message precedes the
-optional child; it does not mean the entire workflow has completed.
+message, single child, parallel pair and join, then exit/handoff. The finish message precedes the
+child; it does not mean the entire workflow has completed.
 
 ## Workflows and nodes
 
@@ -196,6 +202,7 @@ erDiagram
         bool approved
         string result
         bool childPollCompleted
+        PollJoinResult pollJoin "optional completed pair"
     }
 
     HELLO_STATE_SNAPSHOT {
@@ -204,6 +211,7 @@ erDiagram
         bool approved
         string result
         bool child_poll_completed
+        PollJoinResult poll_join "optional completed pair"
     }
 
     WORKFLOW_STATUS {
@@ -232,8 +240,8 @@ erDiagram
 - `.runs/hello.json` stores the latest status, not a history of executions.
   Successful completion removes the checkpoint and discards active state,
   but leaves the final status.
-- Approved and rejected paths share the same state object. The optional poll
-  child or exit handoff uses poll's own state, lock, status and checkpoint;
+- Approved and rejected paths share the same state object. The default-enabled poll
+  child or optional exit handoff uses poll's own state, lock, status and checkpoint;
   neither relationship transfers hello's state.
 
 ## Runnable example: retry and branching
@@ -253,10 +261,10 @@ the output remains UTC. For example, to select Los Angeles explicitly:
 
     php -d date.timezone=America/Los_Angeles repos/naive-workflow/run.php hello
 
-Example session with `America/Los_Angeles` configured (timestamps are
-illustrative; the greeting uses the `USER` environment variable):
+Example session with `America/Los_Angeles` configured and the child skipped
+to focus on branching (timestamps are illustrative; the greeting uses `USER`):
 
-    jd@jd-macbookpro82:~$ php repos/naive-workflow/run.php hello
+    jd@jd-macbookpro82:~$ HELLO_CHILD_POLL=0 php repos/naive-workflow/run.php hello
     [2026-11-04T12:00:00-08:00] Hello, jd!
     [2026-11-04T12:00:00-08:00] Retry demo: requesting retry on attempt 1.
     [2026-11-04T12:00:00-08:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
@@ -264,7 +272,7 @@ illustrative; the greeting uses the `USER` environment variable):
     [2026-11-04T12:00:02-08:00] Choosing node 40.
     [2026-11-04T12:00:02-08:00] jd: rejected branch.
     [2026-11-04T12:00:02-08:00] Finished for jd: rejected.
-    jd@jd-macbookpro82:~$ HELLO_APPROVED=1 php repos/naive-workflow/run.php hello
+    jd@jd-macbookpro82:~$ HELLO_CHILD_POLL=0 HELLO_APPROVED=1 php repos/naive-workflow/run.php hello
     [2026-11-04T12:00:10-08:00] Hello, jd!
     [2026-11-04T12:00:10-08:00] Retry demo: requesting retry on attempt 1.
     [2026-11-04T12:00:10-08:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
@@ -282,7 +290,9 @@ Choose the mechanism based on whether control must return:
 | Exit-node handoff | Same PID, process replaced | Released before handoff | Caller remains done |
 | Managed child node | Separate PID, parent waits | Held while waiting | Parent node fails |
 
-Neither mechanism transfers `$state` or creates an isolated target instance.
+Ordinary handoffs and the single-child example do not transfer `$state`
+or create isolated target instances. The parallel join below explicitly
+uses isolated runtime directories and a validated result protocol.
 The target uses its own workflow lock and any existing checkpoint. There is
 no cross-workflow transaction or exactly-once guarantee.
 
@@ -325,6 +335,10 @@ workflow can continue. The hello example implements this in
 From the repository directory:
 
     HELLO_CHILD_POLL=1 HELLO_POLL=0 php run.php hello
+
+The child runs by default with plain `php run.php hello`; no enable flag is
+needed. Set `HELLO_CHILD_POLL=0` to skip it. Resuming a checkpoint after
+the child node does not replay already-completed earlier nodes.
 
 The node starts `php run.php poll` with `POLL_ONCE=1` in the child's environment.
 On a fresh run, poll performs one tick and its five-second wait, then returns
@@ -498,6 +512,7 @@ Run the bounded regression suite from the repository directory:
     timeout 30s bash tests/retry.sh &&
     timeout 40s bash tests/chain.sh &&
     timeout 50s bash tests/child.sh &&
+    timeout 45s bash tests/parallel.sh &&
     timeout 20s bash tests/mes-oop.sh &&
     timeout 40s bash tests/mes-observe.sh
 
@@ -529,7 +544,7 @@ use the PHP POSIX extension. Fake MES adapters do not require a live database.
   final cleanup and timestamped stderr-only hello/poll output.
 - `chain.sh`: actual handoff ordering, same PID, completion and default stop;
   only the copied poll exit node is replaced to make the fixture finite.
-- `child.sh`: real finite poll child, distinct PIDs, parent continuation,
+- `child.sh`: default single child and parallel join, explicit opt-out, distinct PIDs, parent continuation,
   reaping and child-failure propagation.
 - `mes-oop.sh`: polling hooks, paced branches, revision validation,
   read/configuration/deadline failures and scoped signal restoration.
@@ -543,3 +558,45 @@ Add application-specific coverage and report which tests actually ran.
 
 See `SKILL.md` for migration policy, controller patterns and additional
 application-specific verification requirements.
+
+## Parallel poll children and join
+
+`workflows/hello/60-parallel-poll.php` invokes `ParallelPollNode` after the
+single-child demo. It starts two instances of the real `poll` workflow before
+waiting for either, then joins their tick timestamps and PIDs into the typed
+`Hello\State::pollJoin` object with fixed `left` and `right` result slots.
+
+Plain `php run.php hello` runs both child demonstrations: one poll at node 55,
+then two concurrent polls at node 60. `HELLO_CHILD_POLL=0` skips both. Each child
+receives `POLL_ONCE=1`; the independent exit handoff remains opt-in.
+
+Two ordinary `run.php poll` processes would contend for the same lock.
+The parallel children instead use `child.php poll <private-runtime-directory>`
+and `IsolatedRunner`, sharing the poll code but not locks, status or checkpoints.
+Each attempt creates fresh private directories under
+`.runs/hello/parallel-<random-id>/left` and `right`. These are retained for
+diagnostics and are not listed by the ordinary top-level status report.
+
+The child publishes `result.json` before completion. The parent accepts it
+only after successful exit and validates the done status, PID and result schema.
+Only a complete pair is stored in parent state and atomically published to
+`.runs/hello/last-poll-join.json`. That file is the latest successful join,
+not a history; a failed later attempt does not replace it. Successful hello
+completion discards checkpoint state, but leaves this receipt.
+
+`ChildProcessGroup` supplies one shared lifecycle for single and parallel
+children: inherited output, start-all-before-wait, a monotonic timeout,
+fail-fast errors, SIGINT/SIGTERM/SIGHUP handling and reaping. On error or stop,
+it terminates all remaining siblings, waits a shared grace period, then kills
+and reaps survivors. Signal settings are restored. Default timeout/grace are
+30/5 seconds. Handles never enter checkpoint state.
+
+No automatic restart policy was added. Failure retains the parent node's input
+checkpoint and publishes no partial join. A manual resume starts a fresh pair,
+so completed child effects may repeat. Parent SIGKILL/crash and arbitrary
+descendant cleanup still need an external supervisor. Archive/remove retained
+attempt directories only when their processes are known to have stopped.
+
+Run `timeout 45s bash tests/parallel.sh` for a two-child barrier proving
+concurrent execution, actual joined data, continuation, failure cancellation,
+SIGTERM, timeout and direct-child reaping. Tests use isolated copies.

@@ -9,6 +9,8 @@ require_once __DIR__ . '/WorkflowStatus.php';
 require_once __DIR__ . '/Jump.php';
 require_once __DIR__ . '/Node.php';
 require_once __DIR__ . '/HandoffNode.php';
+require_once __DIR__ . '/ChildProcess.php';
+require_once __DIR__ . '/ChildProcessGroup.php';
 require_once __DIR__ . '/ManagedChildWorkflowNode.php';
 
 require_once __DIR__ . '/RetryableException.php';
@@ -23,3 +25,5 @@ require_once __DIR__ . '/StatusReport.php';
 require_once __DIR__ . '/StatusRepository.php';
 require_once __DIR__ . '/StatusFormatter.php';
 require_once __DIR__ . '/StatusCommand.php';
+
+require_once __DIR__ . '/IsolatedRunner.php';

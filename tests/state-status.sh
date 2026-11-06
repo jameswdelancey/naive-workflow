@@ -18,6 +18,8 @@ with tempfile.TemporaryDirectory() as temporary:
     for folder in ("hello", "poll", "mes-observe"):
         directory = root / "workflows" / folder
         directory.mkdir(parents=True)
+        if folder == "hello":
+            shutil.copy2(source / "workflows/hello/PollJoinResult.php", directory / "PollJoinResult.php")
         if folder == "mes-observe":
             for filename in ("Models.php", "common.php"):
                 shutil.copy2(source / "workflows" / folder / filename, directory / filename)

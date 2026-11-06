@@ -9,6 +9,11 @@ final class ChildPollNode extends \NaiveWorkflow\ManagedChildWorkflowNode
 {
     protected function shouldRun(): bool
     {
+        // A normal hello run includes the finite child; explicit 0 skips it.
+        $mode = getenv('HELLO_CHILD_POLL');
+        if ($mode === false) {
+            return true;
+        }
         return $this->enabled('HELLO_CHILD_POLL');
     }
 
