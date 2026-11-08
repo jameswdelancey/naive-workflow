@@ -1,134 +1,188 @@
 # Naive workflow
 
-A procedural PHP CLI workflow runner: named functions, arrays, explicit error
-returns and ordinary control flow. No application classes, closures, or
-exception-based control flow.
+A procedural PHP CLI workflow runner with sequential nodes, checked routing,
+checkpoints, explicit retries, workflow handoffs and bounded parallel map/reduce.
+Application code uses named functions, arrays and explicit error returns.
 
-## Run
+## Quick start
+
+Run from the repository directory:
 
     php run.php hello
     HELLO_APPROVED=1 php run.php hello
     POLL_ONCE=1 php run.php poll
-    HELLO_CHILD_POLL=1 HELLO_POLL=0 php run.php hello
+    HELLO_CHILD_POLL=1 HELLO_POLL=0 \
+      HELLO_CHILD_ITEMS='[3,1,2,4]' HELLO_CHILD_CONCURRENCY=2 php run.php hello
     php status.php
     php status.php --json
 
-Only the exact value `1` enables a demo option. `HELLO_POLL=1` enables a
-one-way handoff to poll. Poll self-chains unless `POLL_ONCE=1`; stop continuous
-polling with Ctrl-C. Child execution and handoff are independent options.
+Only the exact value `1` enables an option:
 
-Diagnostics use timestamped stderr. Status reports use stdout. PHP's configured
-timezone controls timestamps; use `php -d date.timezone=America/Los_Angeles ...`
-when an explicit timezone is needed.
+| Variable | Behavior |
+| --- | --- |
+| HELLO_APPROVED | Select the approved rather than rejected branch. |
+| HELLO_CHILD_POLL | Enable the map/reduce demo; disabled by default. |
+| HELLO_POLL | Enable a one-way exit handoff to poll. |
+| POLL_ONCE | Stop poll after its current iteration instead of self-handoff. |
 
-## Node contract
+Map execution and exit handoff are independent. An inherited POLL_ONCE=1 also
+makes an exit handoff finite. Continuous poll can be stopped with Ctrl-C.
 
-Create `workflows/<name>/`, where names match `[a-zA-Z0-9_-]+`.
-Numbered PHP files execute in lexicographic order. Use consistently padded,
-unique leading sequence numbers.
+Hello runs greet, retry demonstration, decision, selected branch, finish
+message, optional map, reduce, then exit. Its finish message precedes child
+work and does not mean the workflow has completed. The example above squares
+3, 1, 2 and 4 in workers and reduces their results to 30.
 
-Nodes share `$state`, which must contain JSON-compatible data only. Keep
-database/process handles local to a node.
+## Runtime files
 
-A numbered node returns:
+| File | Responsibility |
+| --- | --- |
+| run.php | CLI execution, locks, checkpoints, status, retry and handoff. |
+| status.php | Ordinary workflow status reports. |
+| result.php | workflow_result, workflow_exit and boundary validation. |
+| state.php | Guarded state access and validation. |
+| next.php | Checked next-node selection. |
+| log.php | Contextual diagnostics and error-string construction. |
+| map.php | Generic map adaptation and optional parent-state publication. |
+| parallel.php | Isolated child lifecycle, bounded concurrency and ordered results. |
+| reduce.php | Ordered reduction and guarded output publication. |
 
-    return workflow_result();                           // success
-    return workflow_result('Invalid configuration');    // stop, exit code 1
-    return workflow_result('Not ready', retry: 5);       // retry this node
+The runner loads log.php, state.php, result.php and next.php. Nodes require
+map.php or reduce.php when needed. Do not require run.php merely to load helpers:
+it executes a workflow. Standalone tools must explicitly load their dependencies.
 
-For compatibility, reaching the end of a numbered file without a return
-also succeeds. Other numbered-node return values are rejected.
+## Nodes and results
 
-A failure retains the checkpoint containing the attempt's INPUT state.
-A retry checkpoints the attempt's MUTATED state plus an absolute retry
-deadline, waits while holding the workflow lock, then reruns the same node.
-The retry delay must be a nonnegative integer number of seconds.
+Create `workflows/<name>/`; names match `[a-zA-Z0-9_-]+`. Numbered PHP files run
+in lexicographic order. Use consistently padded, unique leading numbers.
+Resolve paths via __DIR__ and keep resource handles local to each node.
 
-Retry state and deadlines survive manual restarts. Deadlines use wall-clock
-time, so clock changes affect waits. There is no built-in retry budget.
-Use durable, bounded retry authorization for production work.
+All explicit numbered-node outcomes use:
 
-Functions follow the same explicit-error convention: return an error string
-or null; functions returning data may accept a final by-reference `$error`
-argument. Check errors immediately and clean up resources before returning.
-Do not throw exceptions or call exit/die from a node.
+    return workflow_result();                       // success, including skips
+    return workflow_result($error);                 // null succeeds; string fails
+    return workflow_result('Not ready', retry: 5);   // retry after a delay
+    return workflow_result('Try again', retry: 0);   // immediate retry
 
-Unexpected PHP runtime errors are bugs, not retry requests. A shutdown handler
-makes a best-effort failed status and preserves the existing checkpoint; it
-does not guarantee node-resource cleanup or graceful signal handling.
+The signature is `workflow_result(?string $error = null, ?int $retry = null): ?array`.
+Retry requires a nonempty error message and nonnegative representable delay.
+Invalid combinations produce a failure result. The runner also rejects malformed
+control arrays. Strict argument checking depends on the caller's strict_types.
 
-## Conditional paths
+Do not hand-build node-control arrays, use bare null success returns, throw
+application exceptions or call exit/die in nodes. Helpers retain their own
+data/error contracts: generally null on success, an error string on failure,
+with output arguments where needed. Check errors immediately and convert them
+with workflow_result only at the node boundary. Cleanup precedes return.
 
-    $error = workflow_state_get($state, 'approved', $approved, 'bool');
+Raw null and implicit numbered-file success remain runtime compatibility,
+not the convention for new nodes. Exit-node stop/handoff uses workflow_exit.
+
+## Guarded state
+
+Nodes share a JSON-compatible `$state` array:
+
+    $error = workflow_state_set($state, 'name', 'Ada', 'add');
     if ($error !== null) {
         return workflow_result($error);
     }
+    $error = workflow_state_get($state, 'name', $name, 'string');
+    return workflow_result($error);
+
+- Set defaults to replacing an existing field without changing its concrete type.
+- Explicit `add` rejects existing fields; remove rejects missing fields.
+- Nested paths are key lists such as `['observed', $table]`, not dotted strings.
+- Missing/non-array parents are errors; helpers never silently create them.
+- Get distinguishes missing from present-null and optionally checks a type.
+- For related updates, use a local copy and commit only after every check succeeds.
+
+Use `workflow_state_remove($state, $path)` for deliberate removal.
+Errors identify paths/types rather than stored values. Do not store references,
+objects, resources, recursive arrays, nonfinite numbers or invalid UTF-8.
+Validation limits nesting to 64. Helpers operate on ordinary value arrays,
+not aliases to external mutable variables.
+
+Shipped workflows declare allowed top-level names/types in fields.php.
+The runner validates restored input and node output before retry/advance.
+Absent fields are allowed until a guarded read requires them. Supported types
+are string, int, float, bool, array and null, with an optional `?` prefix.
+Nullable schemas do not allow a replacement to change an existing concrete type.
+Workflows without fields.php retain open-field compatibility and JSON checks.
+Nested invariants remain application responsibilities; this is not a sandbox.
+
+## Checked routing
+
     return workflow_result(workflow_next($approved ? 30 : 40));
 
-A target must match exactly one numbered file's leading sequence number.
-Leading zeroes are ignored. Missing/ambiguous/invalid targets fail.
-No selection means sequential execution.
+workflow_next accepts a nonnegative integer/digit string identifying exactly
+one numbered node. Leading zeroes are ignored without integer conversion.
+Invalid requests return an error and preserve the previous selection.
 
-Selection applies after successful return and resets before each attempt.
-A retry ignores the attempted branch. Branch endpoints must explicitly jump
-over alternatives. Backward/self jumps require bounds, waits and shutdown
-checks; they are not a retry policy.
+Selection does not immediately return from the current node. The runner resets
+it before each attempt, applies it only after success, and ignores it on retry
+or failure. No selection means fall-through, not completion.
+Branch endpoints must skip unwanted alternatives. Bound and pace backward/self
+branches and check shutdown requests. exit.php cannot select a sequence.
+Legacy direct selector assignments are revalidated but should not be used.
 
-## Checkpoints and locks
+## Checkpoints, retries and completion
 
-`.runs/` contains private workflow locks, checkpoints and latest status.
-Ordinary invocations use one nonblocking exclusive lock per workflow; job
-invocations use isolated locks. Locks remain held during
-retry waits and time spent waiting for a managed child.
+Ordinary invocations hold one nonblocking exclusive lock per workflow, including
+retry waits and child execution. `.runs/` stores locks, latest status and
+checkpoints, not execution history.
 
-Before each attempt, the runner atomically publishes the node and input state.
-After success, it checkpoints the selected next node and its input state.
-A manual rerun resumes the checkpoint. Successful completion removes it.
+Before each attempt the runner publishes its node and input state. After
+success it checkpoints the selected next node and its input. Ordinary failure
+retains attempt input; retry checkpoints mutated state and an absolute deadline.
+Manual invocation resumes the checkpoint and saved wait. Deadlines use wall-clock
+time, so clock changes affect retry waits. There is no automatic retry budget.
 
-Atomic rename prevents partial JSON snapshots; it is not an fsync durability
-guarantee. External effects are not rolled back, and a crash can replay them.
-Require idempotency: this is not exactly-once execution.
+Completion removes the checkpoint and discards shared state. Store durable
+schedules, budgets, receipts and deduplication metadata separately.
+Atomic rename prevents partial JSON snapshots; it is not fsync durability.
+External effects are not rolled back and can repeat after crashes or replay.
+Use application idempotency keys; this is not exactly-once processing.
 
-To start fresh, first stop the workflow, inspect/archive its checkpoint, then
-deliberately remove that checkpoint. Never remove a live workflow's checkpoint.
+Unexpected PHP runtime errors are bugs, not retries. Shutdown reporting is
+best-effort and cannot guarantee resource cleanup or graceful signal handling.
+To start fresh, first stop the workflow and inspect/archive its checkpoint.
+Never remove or rewrite a live checkpoint.
 
-## Exit and composition
+## Checked exits
 
-Every shipped `exit.php` uses the checked exit constructor:
+All shipped exit.php files use:
 
     return workflow_exit();        // stop
-    return workflow_exit('poll');  // one-way handoff to an existing workflow
+    return workflow_exit('poll');  // handoff to an existing workflow name
 
-Its first argument must be an absolute executable path. A successful handoff
-uses `pcntl_exec`: same PID, no accumulating child processes, no return to the
-caller. The runner marks the caller done and releases its lock first.
-A failed launch exits nonzero but does not restore the completed checkpoint.
-`exit.php` cannot select a sequence. Error/retry results are also supported.
+The argument is a workflow name, not an executable path.
+The helper checks the target name/directory, readable runner, absolute executable
+PHP file, pcntl_exec support and job-mode restrictions. It returns a canonical
+failure result on invalid preparation; stopping does not require pcntl_exec.
+Exit nodes may forward workflow_result errors/retries during preparation.
 
-`HELLO_CHILD_POLL=1` runs a bounded parallel map followed by reduce:
+The helper does not log, spawn or execute. After successful completion the runner
+removes the checkpoint, publishes done, releases the lock and replaces the process
+with pcntl_exec. Successful handoff keeps the PID and never returns to the caller.
+No state is transferred. A target uses its own checkpoint and lock.
+A launch failure after completion cannot restore the removed checkpoint.
+CLI `-d` settings are not automatically forwarded by workflow_exit.
 
-    HELLO_CHILD_POLL=1 HELLO_POLL=0 \
-      HELLO_CHILD_ITEMS='[3,1,2,4]' HELLO_CHILD_CONCURRENCY=2 php run.php hello
+Legacy raw exit argv is still revalidated at the runner boundary.
+Do not construct workflow argv or call pcntl_exec inside new nodes.
+Finite job-mode workflows must stop and cannot hand off.
 
-Each item runs an isolated finite poll workflow. `30-square.php` squares the input;
-hello's `60-reduce.php` sums the results: 30 for this example.
-Defaults: `[1]`, four concurrent workers, a 30-second whole-map timeout.
-An empty map reduces to zero. Items must be integers from -1000000 to 1000000;
-at most 256 items and 1-32 concurrent workers are accepted.
+## Map and reduce
 
-### Explicit map and reduce phases
+### Visible map configuration
 
-`workflows/hello/55-child-poll.php` contains only its enable check and visible
-configuration. Standard parsing, input wrapping, mapping and result publication
-live in `workflow_map_into()` from map.php:
+`workflows/hello/55-child-poll.php` declares the child, inputs and policies:
 
-    $items = getenv('HELLO_CHILD_ITEMS');
-    $concurrency = getenv('HELLO_CHILD_CONCURRENCY');
     return workflow_result(workflow_map_into(
         state: $state,
         workflow: 'poll',
-        items: $items === false ? [1] : $items,
-        concurrency: $concurrency === false ? 4 : $concurrency,
+        items: [3, 1, 2, 4],
+        concurrency: 2,
         timeout: 30,
         environment: ['POLL_ONCE' => '1'],
         inputField: 'item',
@@ -136,112 +190,148 @@ live in `workflow_map_into()` from map.php:
         completedField: 'child_poll_completed'
     ));
 
-The child name, defaults, timeout, finite environment and state field names stay
-at the call site. The library never reads application environment variables.
-Items may be a PHP list or raw JSON list; concurrency may be an integer or
-canonical decimal string (1-32). Each item becomes `['item' => $value]` here.
-Child workflows validate their own domain values; poll requires bounded integers.
+The actual node reads HELLO_CHILD_ITEMS (default `[1]`) and
+HELLO_CHILD_CONCURRENCY (default 4). Application settings stay at the call site;
+map.php never reads environment variables.
 
-`workflow_map_into()` checks result-field collisions before launching, validates
-configuration, delegates to workflow_map/parallel, and atomically publishes both
-the ordered results and completion marker after all workers succeed.
-On error, parent state is unchanged. One item uses exactly the same mechanism
-as many; an empty list publishes empty results and a true completion marker.
+workflow_map_into accepts a PHP list or raw JSON list and integer/canonical
+decimal-string concurrency. It checks publication collisions before launching,
+wraps each item in the named input field, maps the children and publishes results
+and the completion marker together on success. Expected errors leave parent
+state unchanged. Empty input publishes an empty list and true marker.
+Worker domain validation stays in the worker; poll accepts integers from
+-1000000 to 1000000.
 
-`60-reduce.php` declares a `workflow_reduce_into()` call with
-`workflow_reduce_sum` and initial accumulator zero. The library reads the
-checkpointed map results, folds them and publishes the total.
-A map failure stops at node 55; reduce never runs with partial results.
-A reduce failure resumes its own input checkpoint without rerunning map.
+One child is simply a map with one input. The same parallel lifecycle handles
+single and multiple children. Parent state, explicit child inputs and returned
+child states are distinct.
 
-For callers needing explicit child-state arrays or custom publication, use
-`workflow_map($workflow, $inputs, $concurrency, $timeout, $results, $environment)`.
-It returns ordered final child states without modifying parent state.
-Use workflow_parallel for heterogeneous child workflows.
+### Lower-level APIs and isolated execution
 
-The filename 55-child-poll.php and child_poll_* fields are retained for existing
-checkpoints. The old root child-poll.php/workflow_child_poll wrapper is removed.
-A reduce node is appropriate here, but not mandatory for every child invocation.
-
-### Procedural parallel API
-
-Require `parallel.php` inside a runner node:
+Use `workflow_map($workflow, $inputs, $concurrency, $timeout, $results, $environment)`
+for explicit child-state arrays and custom publication. It does not mutate
+parent state. Use workflow_parallel for heterogeneous jobs:
 
     $jobs = [
         ['workflow' => 'poll', 'state' => ['item' => 3],
          'env' => ['POLL_ONCE' => '1']],
-        ['workflow' => 'poll', 'state' => ['item' => 4],
-         'env' => ['POLL_ONCE' => '1']],
     ];
-    $results = [];
     $error = workflow_parallel($jobs, 2, 30, $results);
-    if ($error !== null) {
-        return workflow_result($error);
-    }
-    $error = workflow_state_set($state, 'mapped', $results, 'add');
     return workflow_result($error);
 
-Jobs may select different workflows. Results are final child states in input
-order, not completion order. The helper returns an error string or null and
-exposes no partial results on error. Limits: 256 jobs, 32 active workers,
-3600 seconds including queueing/startup, 8 MiB per result.
-State must be JSON-compatible. Child stdout/stderr are inherited, not used
-as a result channel. The parent's effective timezone is forwarded explicitly.
+Both return null/error strings and ordered final child states in the output
+argument, with no partial results exposed on expected failure.
+Limits: 256 jobs, 1-32 concurrent workers, 1-3600 timeout seconds and 8 MiB per
+collected result. The monotonic execution deadline covers launching, queueing and
+waiting; batch-file preparation occurs before that deadline is established.
+Child stdout/stderr are inherited, not the result channel.
+The parallel helper forwards the effective PHP timezone explicitly.
 
-Each job owns an isolated lock, checkpoint, status and result under
-`.runs/<parent>/parallel/batch-*/job-<index>/`. Ordinary workflow locks remain
-unchanged; parallel poll jobs do not contend with each other or a normal poll.
-The parent retains its lock. Inputs are explicit rather than inherited state.
+Each job uses private input.json, output.json and runtime lock/checkpoint/status
+files under `.runs/<parent>/parallel/batch-*/job-<index>/`; nested jobs use their
+parent's runtime namespace. Ordinary and isolated instances do not share locks.
+Application files/databases still require their own concurrency safety.
 
-`php run.php <workflow> --job-dir <absolute-existing-directory>` enables job
-mode. The caller writes input.json there before launching. A fresh invocation
-loads input; an existing checkpoint resumes saved state. Successful completion
-atomically writes final state to output.json. Consumers must check both exit
-code zero and valid output. Stale output is removed after acquiring the lock.
-Job workflows must stop: exec handoffs from exit.php are rejected.
+`php run.php <workflow> --job-dir <absolute-existing-directory>` runs an isolated
+job. The caller prepares input.json; a checkpoint resumes saved state instead.
+Consumers require both exit code zero and valid output.json. Stale output is
+removed after lock acquisition during startup processing. Job workflows cannot
+exec-handoff.
 
-On child failure, timeout, SIGINT, SIGTERM or SIGHUP, stop launching, terminate
-all active siblings, allow a shared five-second grace period, then kill/reap
-unfinished direct children. Restore signal handlers before returning.
-SIGKILL, parent crashes, runtime bugs and arbitrary descendants still require
-external supervision where cleanup must be guaranteed.
+On handled error, timeout, SIGINT, SIGTERM or SIGHUP, the controller stops
+launching, terminates active siblings together, allows a shared five-second
+grace, then kills/reaps survivors and restores signal settings.
+This covers direct children, not arbitrary descendants, SIGKILL or parent crashes.
+Use external supervision where stronger guarantees are needed.
 
-Batch input/output/runtime files are retained for inspection. There is no
-automatic retention cleanup; remove old batches only when unused.
-`status.php` reports ordinary runs; inspect each job's runtime JSON directly.
+Batch artifacts are retained; there is no automatic retention cleanup.
+Remove them only when unused. status.php lists ordinary runs, not isolated jobs.
 
-Reduce only after every mapper succeeds. Results are checkpointed as input
-to the separate reduce node, so reduce failures need not rerun the map.
-A failed/replayed map starts a new batch and may repeat completed child effects;
-successful jobs from failed batches are not automatically reused. Use stable
-application idempotency keys and durable deduplication. This is not exactly-once
-execution, a distributed transaction, or shared-resource synchronization.
-Avoid recursive/cyclic calls: isolated locks do not prevent unbounded recursion.
+### Reusable reduction
 
-## Status
+`workflows/poll/30-square.php` calculates one item; it is not another map
+controller. `workflows/hello/60-reduce.php` configures:
 
-Missing status files report idle. Malformed/unreadable files report unknown
-and produce a nonzero command exit while other workflows are still reported.
-`/proc` provides best-effort stopped-process detection, not a health check;
-PID reuse may hide a stopped process.
+    return workflow_result(workflow_reduce_into(
+        state: $state,
+        resultsField: 'child_poll_results',
+        completedField: 'child_poll_completed',
+        outputField: 'child_poll_sum',
+        reducer: 'workflow_reduce_sum',
+        initial: 0
+    ));
 
-`RETRY AT` preserves the recorded deadline. `retry_after_seconds` is a saved
-snapshot, not a live countdown. `UPDATED AT` / `updated_at` is the modification
-time of the exact open status-file snapshot, not query time or a heartbeat.
-Human output is sanitized and width-bounded; JSON preserves recorded metadata.
+The library checks map completion, folds outputs in input order, validates
+accumulators and publishes only the final value. Missing/inconsistent markers,
+incomplete maps, unordered outputs and output-field collisions are errors.
+No marker/results means a skipped map and skipped reduction.
+An empty map publishes the initial value.
 
-## Examples
+Named reducers use `(accumulator, item, index, &next) -> null or error string`.
+Set next on success. Keep reducers pure and accumulators JSON-compatible;
+external effects cannot be rolled back. workflow_reduce_sum requires integer
+result fields and rejects integer overflow.
 
-Hello: greet, one explicit retry, select approved/rejected branch, finish
-message, optional map node, reduce node, exit/handoff. The finish message precedes the
-optional child and is not the workflow completion status.
+Map failure stops before reduce. A separate reduce node checkpoints map output,
+so a reduce failure can resume without rerunning successful map work.
+A failed/replayed map creates a fresh batch and may repeat completed workers.
+Use stable application idempotency keys, not generated batch names.
+A separate reduce is useful here, not mandatory for all child invocations.
 
-MES observer: see `workflows/mes-observe/README.md`. Its record adapter uses
-the procedural mysqli API, not PDO or Active Record classes.
+### Existing checkpoints
+
+Keep hello's 55-child-poll.php filename and child_poll_* fields for compatibility.
+The old root child-poll.php/workflow_child_poll wrapper was removed; callers now
+use explicit generic map APIs.
+
+Poll's worker was renamed from 30-map.php to 30-square.php.
+Checkpoints naming the old file fail explicitly and remain retained.
+Stop affected processes, inspect/archive saved state and deliberately migrate
+the filename only after verifying compatibility. This includes isolated jobs.
+No automatic live checkpoint rewrite or restart is performed.
+
+## Diagnostics and status
+
+log.php owns the sole application stderr writer:
+
+    workflow_log_context('fetch', 'Request started');
+    workflow_log_context('fetch', $error, null, 'error');
+
+The optional timestamp preserves saved event time. Routine messages default to
+info, retries use warning, failures use error. Helpers return errors without
+logging; the runner reports them after cleanup with workflow/node context.
+Parallel owns worker lifecycle messages; nodes own application summaries.
+`workflow_error($operation, $message, $path = null)` constructs contextual error
+strings without logging. Avoid passwords, full DSNs and environment dumps.
+
+- WORKFLOW_LOG_LEVEL: debug, info, warning or error; default/unknown is info.
+- WORKFLOW_LOG_FORMAT=json: NDJSON on stderr; other values select text.
+- JSON fields: timestamp, level, context, message, workflow, job, batch, pid, node.
+- Text escapes CR/LF; JSON escapes controls and replaces invalid UTF-8.
+- The runner derives job/batch labels from its invocation; worker text includes
+  job, batch and PID. These are diagnostics, not authenticated identities.
+
+PHP-engine warnings and external child output are outside this formatting.
+Status tables/JSON stay on stdout regardless of diagnostic format.
+PHP's configured timezone controls default timestamps.
+
+Missing ordinary status files report idle. Invalid/unreadable files report
+unknown, log diagnostics and cause nonzero exit while retaining partial reports.
+/proc provides best-effort stopped detection, not health or PID-reuse protection.
+RETRY AT is the saved deadline; retry_after_seconds is not a live countdown.
+UPDATED AT / updated_at is the exact open snapshot's mtime, not query time,
+a heartbeat or a durability guarantee. Human output is sanitized/width-bounded.
+
+## MES example
+
+See workflows/mes-observe/README.md before adapting the observe-only manufacturing
+example. Its procedural mysqli adapter does not issue manufacturing commands
+or application database writes. SQL permissions, TLS and producer revision
+contracts remain deployment responsibilities.
 
 ## Tests
 
-Run from this directory:
+Run from the repository directory:
 
     timeout 30s bash tests/reduce.sh &&
     timeout 30s bash tests/map-into.sh &&
@@ -260,239 +350,18 @@ Run from this directory:
     timeout 30s bash tests/procedural.sh &&
     timeout 60s bash tests/parallel.sh
 
-Tests use temporary copies and fake MES records, never live checkpoints or
-a live database. Bash, Python 3 and PHP CLI are required; process composition
-also requires pcntl and enabled process functions. Live MySQL, production
-network behavior, comprehensive signal/timeout recovery, descendant cleanup
-and exactly-once effects are not established by these tests.
+Tests use temporary copies and fake MES records, not live checkpoints/database.
+Harnesses need Bash, Python 3 and PHP CLI; process tests need pcntl and enabled
+process functions. Copy run.php, log.php, state.php, result.php and next.php into
+runner fixtures; add map.php/parallel.php and reduce.php when used, plus workflow
+nodes, fields.php and helper files.
 
-## Shared logging
+Coverage includes guarded state, result/routing/exit validation, logging,
+map/reduce publication, ordered results, bounded concurrency, failure/stop/timeout
+cleanup, checkpoint resume and finite process replacement.
+These tests do not establish live MySQL connectivity/permissions, production
+network behavior, crash durability, descendant cleanup, durable retry budgets,
+cron/DST correctness or exactly-once effects. Report tests actually run.
 
-The runner and hello/poll demos use `workflow_log($message)` from `log.php`.
-Pass an optional second argument to preserve an event's saved timestamp.
-The logger escapes embedded CR/LF and writes one timestamped stderr line.
-Require log.php directly for standalone nodes/tools; do not require run.php
-just to load functions. Include log.php when copying the runner into fixtures.
-
-## Diagnostic ownership
-
-`log.php` is the sole application stderr writer.
-`workflow_log_context($context, $message, $timestamp = null)` adds a consistent
-prefix before sanitizing the complete line. Hello uses `hello`, poll uses
-`poll`, MES uses `mes-observe`, and status uses `status`.
-Saved poll timestamps are preserved; status tables/JSON remain on stdout.
-
-MES and status call `workflow_log_context()` directly; redundant wrappers are removed.
-The parallel library owns worker start/completion messages for both one and
-many children; the map node does not duplicate them.
-Helpers return errors without logging; the runner reports each returned failure
-once after cleanup. A child and its parent may report distinct failure events.
-PHP-engine warnings and external child output are outside this logger.
-
-Application messages such as greetings, branch decisions and reduced totals
-remain at their call sites rather than gaining one-purpose wrappers.
-
-Run `timeout 30s bash tests/logging.sh` for writer ownership, sanitization,
-saved timestamps, clean JSON and failure-message duplication checks.
-
-## Diagnostic options
-
-- `WORKFLOW_LOG_LEVEL=debug|info|warning|error`: minimum severity; default info.
-  Error mode suppresses routine ticks, worker lifecycle and application messages,
-  but never failures. Retry diagnostics are warnings. Unknown levels use info.
-- `WORKFLOW_LOG_FORMAT=json`: newline-delimited JSON on stderr; otherwise text.
-  Fields: timestamp, level, context, message, workflow, job, batch, pid, node.
-  JSON preserves message newlines as escaped characters and replaces invalid UTF-8.
-  Status report stdout is independent of diagnostic format.
-- Existing workflow_log/workflow_log_context calls default to info. Pass a fourth
-  argument to workflow_log_context to select severity, e.g.
-  `workflow_log_context('fetch', $error, null, 'error')`.
-
-The runner derives job/batch labels from its actual job directory, not inherited
-labels. Text worker diagnostics include job, batch and PID; JSON always includes
-PID, plus workflow/node identity when running under the runner.
-Controller lifecycle messages remain in the parent's context and identify the job.
-These fields are diagnostic hints, not authenticated process identities.
-
-`workflow_error($operation, $message, $path = null)` builds an error string
-without logging. File/JSON/job failures include their operation and relevant path.
-Record query failures identify the table. Do not pass passwords, full DSNs or
-environment dumps; connection failures report a numeric driver code.
-The runner remains responsible for logging returned errors after cleanup.
-
-Run `timeout 30s bash tests/logging-options.sh` for level/JSON/identity/error tests.
-
-## Guarded state
-
-The runner loads state.php. Standalone tools should require it directly.
-
-    $error = workflow_state_set($state, 'name', 'Ada', 'add');
-    $error = workflow_state_get($state, 'name', $name, 'string');
-    $error = workflow_state_set($state, 'name', 'Grace');
-    $error = workflow_state_remove($state, 'name');
-
-Check each returned error; nodes return `workflow_result($error)`.
-Set defaults to replacing an existing key without changing its concrete type.
-Adding requires explicit `add` and rejects existing keys. Removal rejects
-missing keys. Nested paths use explicit lists, e.g. `['observed', $table]`;
-missing/non-array parents are errors, never silently created.
-Get distinguishes missing from present-null and optionally checks a type.
-Errors identify the field path and types, not stored values.
-For related updates, use a local copy and commit only after all checks succeed.
-Do not store PHP references in state; these helpers operate on ordinary
-JSON-compatible arrays, not aliases to external mutable variables.
-
-Shipped workflows declare allowed top-level names/types in fields.php.
-The runner checks restored input and node output before retry/advance,
-including writes that bypass helpers. Fields may be absent until a node needs
-them; use guarded reads for prerequisites. Nested invariants remain application
-responsibilities. No fields.php retains open-field compatibility.
-This is runtime validation, not a sandbox or immutable-state guarantee.
-
-State cannot contain objects/resources, nonfinite numbers, invalid UTF-8 or
-recursive arrays; nesting is limited to 64. Failures retain attempt input.
-Nullable declarations permit null, but replacement still rejects concrete
-type changes; remove then add only for intentional type transitions.
-Branch loops must explicitly replace existing fields rather than re-add them.
-
-Copy state.php into isolated runner fixtures.
-Run `timeout 30s bash tests/state.sh` alongside the regression suite.
-
-## Constructing node results
-
-Use the procedural constructor instead of writing control arrays by hand:
-
-    return workflow_result();                         // success: null
-    return workflow_result($error);                   // null succeeds; string fails
-    return workflow_result('Not ready', retry: 5);     // retry after five seconds
-    return workflow_result('Try again', retry: 0);     // immediate retry
-
-Signature: `workflow_result(?string $error = null, ?int $retry = null): ?array`.
-Retry null means no retry; zero is a real retry delay. Retry requires a nonempty
-error message and a nonnegative representable delay. Invalid combinations
-produce a normal failure result, never an accidental retry or silent success.
-Strict PHP type checking applies when called from strict-types files.
-
-Helpers continue returning error strings or null. Nodes convert those errors
-with `return workflow_result($error)`. The constructor does not log or exit.
-The runner also validates returned arrays: missing/empty error messages,
-unexpected keys and invalid retry types fail with workflow/node context.
-Construction reduces mistakes but cannot make mutable PHP arrays opaque.
-Use `return workflow_result();` for every explicit node success, including
-disabled/skipped numbered-node paths. Exit nodes use `workflow_exit()` to stop. Use `workflow_result($error)` for
-helper outcomes and `workflow_result($error, retry: $seconds)` for retries.
-Do not mix bare null returns or hand-built control arrays in workflow nodes.
-Helper functions retain their own data/error contracts and may return null.
-Raw null and implicit numbered-file success remain runtime compatibility only;
-exit argv is a separate contract and is not passed through workflow_result.
-
-The runner loads result.php; standalone nodes/tools and isolated fixtures must
-load/copy it explicitly. Run `timeout 30s bash tests/results.sh`.
-
-## Checked next-sequence selection
-
-Use `workflow_next($sequence)` instead of directly assigning nextSequence:
-
-    $error = workflow_next($approved ? 30 : 40);
-    return workflow_result($error);
-
-The helper returns null on success or an error string. It accepts a nonnegative
-integer/digit string and requires exactly one matching numbered node in the
-runner's discovery snapshot. Leading zeroes are ignored, without converting
-large sequence strings to integers. Invalid requests preserve the previous
-selection; they never silently clear it. Check the error immediately.
-
-Calling the function selects the next node, not an immediate jump or return.
-The runner resets selection before every attempt and applies it only after
-success. Retry/failure does not apply the selected branch. exit.php cannot
-select a sequence. Calling outside an active runner node returns an error.
-
-The runner revalidates selection as a compatibility boundary for legacy direct
-assignments. Shipped nodes use the helper. Routing is process-local and separate
-from checkpointed application state. Copy next.php into isolated runner fixtures.
-Run `timeout 30s bash tests/next.sh`.
-
-## Checked exit results
-
-`workflow_exit(?string $workflow = null): ?array` lives in result.php.
-Use `return workflow_exit();` to stop and `return workflow_exit('poll');`
-to hand off. Do not build workflow argv or call pcntl_exec inside exit nodes.
-
-The helper validates a simple existing workflow name, readable runner,
-absolute executable PHP file, process-replacement support and finite-job rules.
-Invalid preparation returns a canonical workflow_result error for the runner
-to report, retaining the exit checkpoint. Stop does not require pcntl_exec.
-The helper neither logs nor executes; only the runner removes the checkpoint,
-publishes done, releases the lock and performs process replacement.
-
-Numbered node outcomes still use workflow_result. Exit nodes may forward
-workflow_result errors/retries when doing preparation work, but ordinary
-stop/handoff results use workflow_exit. Helper/data-return contracts are unchanged.
-Legacy raw exit argv remains supported and is revalidated with
-workflow_exit_validate; construction does not make PHP arrays immutable.
-This wrapper deliberately accepts workflow names rather than arbitrary commands.
-CLI timezone forwarding remains unchanged from previous handoff behavior.
-A launch failure after completion cannot restore the deleted checkpoint.
-
-Run `timeout 30s bash tests/exit.sh` for construction and real finite handoff tests.
-
-## Map configuration ownership
-
-Workflow nodes declare application choices: child name, inputs, finite
-environment, concurrency, timeout and publication field names.
-map.php supplies reusable input adaptation and optional guarded publication.
-parallel.php owns isolation, bounded launches, ordered joins and sibling cleanup.
-For heterogeneous workflows use workflow_parallel with explicit per-job names.
-Runtime libraries copied into fixtures are run.php, log.php, state.php,
-result.php, next.php and, when mapping/reducing, map.php, parallel.php and reduce.php.
-Run tests/map-into.sh, tests/map.sh, tests/child.sh and tests/parallel.sh after changing this flow.
-
-## Worker naming and old checkpoints
-
-`workflows/poll/30-square.php` performs one child's calculation. It does not
-launch a map; hello's node 55 owns orchestration and node 60 owns reduction.
-
-This file was previously named `workflows/poll/30-map.php`. A saved poll
-checkpoint referencing that exact old filename cannot resume automatically.
-The runner fails explicitly and retains it; no live checkpoints are rewritten
-or deleted by this rename. Stop the affected runner and archive its checkpoint
-before deliberately updating its node field to `30-square.php`, after verifying
-the workflow and saved state. This also applies to retained isolated job
-checkpoints. The worker's sequence number and calculation are unchanged.
-
-## Reusable reduce
-
-Require reduce.php and make reducer configuration explicit:
-
-    return workflow_result(workflow_reduce_into(
-        state: $state,
-        resultsField: 'child_poll_results',
-        completedField: 'child_poll_completed',
-        outputField: 'child_poll_sum',
-        reducer: 'workflow_reduce_sum',
-        initial: 0
-    ));
-
-The library owns completion checks, ordered iteration, accumulator validation
-and guarded output publication. A skipped map (no marker/results) skips reduce.
-Missing/inconsistent markers, incomplete maps, unordered results and existing
-output fields are errors. Empty maps publish the initial accumulator.
-Parent state is unchanged on expected errors; no partial total is published.
-
-Named reducer functions have this contract:
-
-    function my_reducer(
-        mixed $accumulator, mixed $item, int $index, mixed &$next
-    ): ?string
-
-Set `$next` and return null on success, or return a nonempty error string.
-Use pure reducers: no mutation through references, handles or external effects.
-The library cannot roll back reducer side effects or recover arbitrary runtime
-bugs. Each successful accumulator must be JSON-compatible.
-`workflow_reduce_sum` reads each child's integer `result` and rejects integer
-overflow. Application-specific reducers can implement other folds.
-
-Keep reduce in a separate node so a reduce failure resumes its checkpoint
-without replaying successful map work. Workflow nodes retain application
-summaries; the reduce library neither logs nor chooses application fields.
-Run `timeout 30s bash tests/reduce.sh`.
+Production migration policy, including bounded retry/restart budgets, is in
+SKILL.md; it is not automatically enforced by this runner.
