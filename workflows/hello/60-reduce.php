@@ -1,32 +1,23 @@
 <?php
-if (!array_key_exists('child_poll_completed', $state)) {
-    return workflow_result();
-}
-$error = workflow_state_get($state, 'child_poll_completed', $completed, 'bool');
+require_once dirname(__DIR__, 2) . '/reduce.php';
+
+// Reduce the preceding map's outputs; the library owns checks and publication.
+$error = workflow_reduce_into(
+    state: $state,
+    resultsField: 'child_poll_results',
+    completedField: 'child_poll_completed',
+    outputField: 'child_poll_sum',
+    reducer: 'workflow_reduce_sum',
+    initial: 0
+);
 if ($error !== null) {
     return workflow_result($error);
 }
-if (!$completed) {
-    return workflow_result();
-}
-$error = workflow_state_get($state, 'child_poll_results', $results, 'array');
-if ($error !== null) {
-    return workflow_result($error);
-}
-$sum = 0;
-foreach ($results as $index => $mapped) {
-    if (!is_array($mapped)) {
-        return workflow_result("Map result $index must be an array");
-    }
-    $error = workflow_state_get($mapped, 'result', $value, 'int');
+if (array_key_exists('child_poll_sum', $state)) {
+    $error = workflow_state_get($state, 'child_poll_sum', $sum, 'int');
     if ($error !== null) {
-        return workflow_result("Map result $index: $error");
+        return workflow_result($error);
     }
-    $sum += $value;
+    workflow_log_context('hello', "Reduced child poll results: $sum.");
 }
-$error = workflow_state_set($state, 'child_poll_sum', $sum, 'add');
-if ($error !== null) {
-    return workflow_result($error);
-}
-workflow_log_context('hello', "Reduced child poll results: $sum.");
 return workflow_result();

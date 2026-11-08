@@ -13,7 +13,7 @@ import tempfile
 source = Path(sys.argv[1])
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
-    for name in ("run.php", "log.php", "state.php", "result.php", "next.php"):
+    for name in ("run.php", "log.php", "state.php", "result.php", "next.php", "reduce.php"):
         shutil.copy2(source / name, root / name)
     (root / "probe.php").write_text(r'''<?php
 declare(strict_types=1);
@@ -94,6 +94,10 @@ for path in (source / "workflows").glob("*/*.php"):
         assert "return null;" not in text, path
         assert "return ['error' =>" not in text, path
         assert "return ['retry' =>" not in text, path
-        assert "return workflow_result(" in text, path
+        if path.name == "exit.php":
+            assert "workflow_exit(" in text, path
+            assert "return [PHP_BINARY" not in text, path
+        else:
+            assert "return workflow_result(" in text, path
 print("PASS: canonical node results, retry zero, invalid arguments/shapes, retained checkpoints and exit failures")
 PYTEST

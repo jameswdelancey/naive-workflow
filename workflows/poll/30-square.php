@@ -1,4 +1,5 @@
 <?php
+// Worker calculation only; the parent owns map orchestration.
 if (!array_key_exists('item', $state)) {
     return workflow_result();
 }

@@ -20,8 +20,9 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copy2(source / "state.php", root / "state.php")
     shutil.copy2(source / "result.php", root / "result.php")
     shutil.copy2(source / "next.php", root / "next.php")
+    shutil.copy2(source / "reduce.php", root / "reduce.php")
     shutil.copy2(source / "parallel.php", root / "parallel.php")
-    shutil.copy2(source / "child-poll.php", root / "child-poll.php")
+    shutil.copy2(source / "map.php", root / "map.php")
     for name in ("hello", "poll"):
         shutil.copytree(source / f"workflows/{name}", root / f"workflows/{name}")
     env = dict(os.environ, USER="child-test", HELLO_APPROVED="1",

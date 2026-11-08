@@ -9,14 +9,15 @@ Read README.md, run.php and the application before changing behavior.
 Use named functions, plain arrays, explicit error returns and ordinary control
 flow. Do not introduce application classes, closures or exception control flow.
 
-All explicit node outcomes use the shared constructor:
+All explicit numbered-node outcomes use the shared result constructor:
 - `return workflow_result();` for success, including skipped/disabled paths.
 - `return workflow_result($error);` for helper outcomes or failures.
 - `return workflow_result($error, retry: $seconds);` for retries.
 
 Do not use bare null returns or hand-built control arrays in workflow nodes.
 Helper functions keep their data/error contracts and may return null.
-Exit handoff argv remains a separate return contract.
+Exit nodes use workflow_exit() to stop or workflow_exit('target') to hand off.
+Preparation errors/retries can still use workflow_result.
 Functions return errors explicitly; check them immediately.
 Release resources on a shared cleanup path before returning an error or retry.
 Never call exit/die inside a node.
@@ -33,7 +34,7 @@ Selection takes effect only after successful return, resets every attempt,
 and is ignored when retrying. No selection means fall-through, not completion.
 Branch endpoints must jump over unwanted alternatives.
 Every cycle needs bounded work, an interruptible wait and a shutdown check.
-Route normal stops to cleanup, and make exit.php return workflow_result() after stopping.
+Route normal stops to cleanup, and make exit.php return workflow_exit() after stopping.
 
 Before each attempt, the runner checkpoints input state. Ordinary errors retain
 that input; retries preserve mutated state and a retry deadline. Neither rolls
@@ -104,8 +105,8 @@ clean up and return normally without self-chaining.
 
 # Composition
 
-exit.php returns workflow_result() to stop or a nonempty argv list with an
-absolute executable path for a handoff.
+exit.php returns workflow_exit() to stop or workflow_exit('target') for a
+checked workflow handoff. Do not construct workflow argv in node files.
 A handoff completes the caller, releases its lock and replaces the process with
 pcntl_exec. It never returns or transfers state. Forward required PHP CLI settings
 explicitly. Launch failure does not restore the completed caller checkpoint.
@@ -115,7 +116,7 @@ and returns only after its exit code is checked. Avoid self-calls and dependency
 cycles. Child success is not transactionally linked to the parent's checkpoint;
 parent replay may repeat child effects.
 
-See hello/55-child-poll.php for finite child execution and explicit cleanup.
+See hello/55-child-poll.php for explicit map configuration; parallel.php owns cleanup.
 Enable HELLO_CHILD_POLL=1 HELLO_POLL=0. HELLO_POLL independently controls handoff.
 
 # Verify
@@ -150,13 +151,24 @@ status.php covers ordinary runs; inspect job runtime JSON separately.
 Run tests/parallel.sh for bounded concurrency, ordered reduction, isolation,
 failure/stop/timeout cleanup and manual resume.
 
-# Reusable child polling
+# Explicit map/reduce nodes
 
-Require child-poll.php and call workflow_child_poll($state) for the poll demo.
-It returns an error string or null and uses workflow_parallel even for one job.
-Keep workflow nodes thin: optional enable check, library call, error conversion.
-Do not duplicate input validation, process launching, waiting or cleanup there.
-For non-poll workflows, use workflow_parallel directly with explicit job inputs.
+Keep child name, item source/defaults, concurrency, timeout, finite environment
+and input/result/completion field names visible in the map node.
+Use workflow_map_into with named arguments for standardized list parsing,
+item-to-child-state wrapping, bounded execution and guarded publication.
+The library accepts supplied values; it never reads hello-specific environment.
+
+On failure workflow_map_into leaves parent state unchanged. Publication fields
+must be absent; collisions fail before launching. Worker domain validation stays
+in the worker. One item and many use the same parallel lifecycle.
+Use workflow_map for explicit input state arrays and custom publication.
+Use workflow_parallel for heterogeneous jobs.
+
+Reduce in a subsequent numbered node when needed; errors stop before reduce.
+Retain 55-child-poll.php and child_poll_* fields for checkpoint compatibility.
+Do not duplicate parsing, launch/wait/cleanup or publication loops in nodes.
+Run tests/map-into.sh, tests/map.sh, tests/child.sh and tests/parallel.sh.
 
 # Shared diagnostics
 
@@ -170,7 +182,7 @@ Copy log.php alongside run.php in isolated fixtures.
 Use workflow_log_context($context, $message) for contextual diagnostics.
 log.php owns the sole stderr writer; MES/status use direct context calls.
 The parallel controller owns worker lifecycle messages for every group size;
-do not duplicate them in workflow nodes or poll wrappers.
+do not duplicate them in workflow nodes or map adapters.
 Return helper errors without logging; the runner reports failures after cleanup.
 Child and parent failures are distinct diagnostic events.
 Keep application message text local rather than adding trivial wrappers.
@@ -202,7 +214,8 @@ Run tests/state.sh and copy state.php alongside the runner in fixtures.
 Use return workflow_result($error, retry: $seconds) rather than hand-built arrays.
 Use return workflow_result() even for unconditional success.
 Omit retry for failure; null error with no retry means success.
-This convention includes early skip returns and exit.php stopping.
+This convention includes early numbered-node skip returns.
+Exit stop/handoff results use workflow_exit, not workflow_result.
 Do not change helper/data-return functions to node-result constructors.
 A retry needs a nonempty error string; zero is an immediate retry.
 Invalid combinations return a failure result. Do not discard the returned result.
@@ -218,3 +231,36 @@ The helper validates a unique numbered target and preserves prior selection
 on error. It does not return from the caller: finish required local work first.
 The runner resets each attempt, ignores selection on retry/failure, and rejects
 exit-node branching. Copy next.php into fixtures and run tests/next.sh.
+
+# Checked exits
+
+Use return workflow_exit() or return workflow_exit('workflow') in exit.php.
+The helper in result.php checks target and executable support before returning;
+it does not execute or log. Invalid preparation returns a workflow_result error.
+The runner owns completion, checkpoint removal, unlocking and exec.
+Finite job-mode workflows cannot hand off. Do not duplicate argv validation.
+Legacy raw argv is revalidated at the runner boundary for compatibility.
+Run tests/exit.sh alongside tests/results.sh and tests/chain.sh.
+
+# Map orchestration versus worker calculation
+
+Hello node 55 orchestrates the map; poll/30-square.php calculates one item;
+hello node 60 reduces outputs. Do not call worker calculations map controllers.
+The worker was renamed from poll/30-map.php. Existing checkpoints naming the
+old file fail explicitly and are retained. Never silently restart, rewrite or
+delete live checkpoints; review/archive and migrate only stopped instances.
+
+# Reusable reduce
+
+Require reduce.php and call workflow_reduce_into with named results/completion/
+output fields, a named reducer and an explicit initial accumulator.
+The library owns completion checks, ordered folding and guarded publication.
+Use workflow_reduce_sum for integer result fields; overflow fails explicitly.
+Do not duplicate reduce loops or publication checks in workflow nodes.
+
+Reducer signature: (accumulator, item, index, &next) -> null or error string.
+Set next on success. Keep reducers pure and accumulators JSON-compatible.
+Expected errors leave parent state unchanged; external effects are not rolled back.
+Empty maps publish the initial value; skipped maps skip reduction.
+Use a separate reduce node for checkpoint resume without map replay.
+Copy reduce.php into fixtures and run tests/reduce.sh.

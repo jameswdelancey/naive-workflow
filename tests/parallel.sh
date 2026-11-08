@@ -16,7 +16,7 @@ import time
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     source = Path(sys.argv[1])
-    for name in ("run.php", "log.php", "state.php", "result.php", "next.php", "parallel.php", "child-poll.php"):
+    for name in ("run.php", "log.php", "state.php", "result.php", "next.php", "reduce.php", "parallel.php", "map.php"):
         shutil.copy2(source / name, root / name)
     for name in ("hello", "poll"):
         shutil.copytree(source / "workflows" / name, root / "workflows" / name)
@@ -132,11 +132,11 @@ sleep(20);
     finally:
         kill_group(p)
 
-    controller = root / "child-poll.php"
+    controller = root / "workflows/hello/55-child-poll.php"
     original = controller.read_text()
     controller.write_text(original.replace(
-        "workflow_parallel($jobs, $concurrency, 30, $results)",
-        "workflow_parallel($jobs, $concurrency, 1, $results)"
+        "timeout: 30,",
+        "timeout: 1,"
     ))
     p = start()
     try:

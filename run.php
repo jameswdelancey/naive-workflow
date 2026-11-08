@@ -296,21 +296,11 @@ while ($position < count($steps)) {
             $next = $result;
             if ($next !== null) {
                 if ($jobDir !== null) {
-                    workflow_fail('Job workflows cannot hand off; return null from exit.php');
+                    workflow_fail('Job workflows cannot hand off; use workflow_exit() to stop');
                 }
-                if (!is_array($next) || !array_is_list($next) || !$next) {
-                    workflow_fail('exit.php must return null or an argv array');
-                }
-                foreach ($next as $argument) {
-                    if (!is_string($argument) || str_contains($argument, "\0")) {
-                        workflow_fail('exit.php argv must contain strings without NUL bytes');
-                    }
-                }
-                if (!str_starts_with($next[0], '/') || !is_executable($next[0])) {
-                    workflow_fail('exit.php requires an absolute executable path');
-                }
-                if (!function_exists('pcntl_exec')) {
-                    workflow_fail('Process replacement requires pcntl_exec');
+                $error = workflow_exit_validate($next);
+                if ($error !== null) {
+                    workflow_fail($error);
                 }
             }
         } elseif ($result !== null && $result !== 1) {

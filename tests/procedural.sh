@@ -21,6 +21,7 @@ with tempfile.TemporaryDirectory() as directory:
     shutil.copy2(source / "state.php", root / "state.php")
     shutil.copy2(source / "result.php", root / "result.php")
     shutil.copy2(source / "next.php", root / "next.php")
+    shutil.copy2(source / "reduce.php", root / "reduce.php")
     workflow = root / "workflows/check"
     workflow.mkdir(parents=True)
     env = dict(os.environ)

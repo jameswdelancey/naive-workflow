@@ -1,2 +1,2 @@
 <?php
-return workflow_result();
+return workflow_exit();

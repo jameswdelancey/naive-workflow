@@ -13,7 +13,7 @@ import tempfile
 source = Path(sys.argv[1])
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
-    for name in ("run.php", "log.php", "state.php", "result.php", "next.php"):
+    for name in ("run.php", "log.php", "state.php", "result.php", "next.php", "reduce.php"):
         shutil.copy2(source / name, root / name)
     (root / "probe.php").write_text(r'''<?php
 declare(strict_types=1);

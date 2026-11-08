@@ -15,7 +15,7 @@ import tempfile
 
 source = Path(sys.argv[1])
 production = [source / name for name in (
-    "run.php", "status.php", "log.php", "state.php", "result.php", "next.php", "parallel.php", "child-poll.php"
+    "run.php", "status.php", "log.php", "state.php", "result.php", "next.php", "reduce.php", "parallel.php", "map.php"
 )]
 production += list((source / "workflows").rglob("*.php"))
 writers = [
@@ -26,7 +26,7 @@ assert writers == ["log.php"], writers
 
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
-    for name in ("run.php", "status.php", "log.php", "state.php", "result.php", "next.php", "parallel.php", "child-poll.php"):
+    for name in ("run.php", "status.php", "log.php", "state.php", "result.php", "next.php", "reduce.php", "parallel.php", "map.php"):
         shutil.copy2(source / name, root / name)
     shutil.copytree(source / "workflows/poll", root / "workflows/poll")
     common = root / "workflows/mes-observe/common.php"

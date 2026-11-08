@@ -1,7 +1,3 @@
 <?php
-// Child invocations can request one iteration; ordinary polling still self-chains.
-if (getenv('POLL_ONCE') === '1') {
-    return workflow_result();
-}
-
-return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', basename(__DIR__)];
+// Child jobs stop; ordinary polling replaces itself after completion.
+return workflow_exit(getenv('POLL_ONCE') === '1' ? null : 'poll');

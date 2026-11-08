@@ -51,3 +51,50 @@ function workflow_result_validate(mixed $result, bool $exitNode = false): ?strin
     }
     return null;
 }
+
+// Shared boundary check for legacy argv and constructed handoffs.
+function workflow_exit_validate(mixed $command): ?string
+{
+    if ($command === null) {
+        return null;
+    }
+    if (!is_array($command) || !array_is_list($command) || !$command) {
+        return 'exit.php must return workflow_exit() or a nonempty argv list';
+    }
+    foreach ($command as $argument) {
+        if (!is_string($argument) || str_contains($argument, "\0")) {
+            return 'exit.php argv must contain strings without NUL bytes';
+        }
+    }
+    if (!str_starts_with($command[0], '/') ||
+        !is_file($command[0]) || !is_executable($command[0])) {
+        return 'exit.php requires an absolute executable file path';
+    }
+    if (!function_exists('pcntl_exec')) {
+        return 'Process replacement requires pcntl_exec';
+    }
+    return null;
+}
+
+// Stop by default; otherwise construct a checked workflow handoff.
+// This only returns a result: completion, unlocking and exec belong to the runner.
+function workflow_exit(?string $workflow = null): ?array
+{
+    if ($workflow === null) {
+        return workflow_result();
+    }
+    if (!preg_match('/^[a-zA-Z0-9_-]+$/D', $workflow) ||
+        !is_dir(__DIR__ . '/workflows/' . $workflow)) {
+        return workflow_result('Invalid exit workflow: expected an existing simple workflow name');
+    }
+    $runner = __DIR__ . '/run.php';
+    if (!is_file($runner) || !is_readable($runner)) {
+        return workflow_result('Cannot prepare workflow handoff: runner is missing or unreadable');
+    }
+    if (($GLOBALS['jobDir'] ?? null) !== null) {
+        return workflow_result('Job workflows cannot hand off; use workflow_exit() to stop');
+    }
+    $command = [PHP_BINARY, $runner, $workflow];
+    $error = workflow_exit_validate($command);
+    return $error === null ? $command : workflow_result($error);
+}

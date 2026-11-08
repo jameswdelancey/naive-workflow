@@ -94,10 +94,10 @@ deliberately remove that checkpoint. Never remove a live workflow's checkpoint.
 
 ## Exit and composition
 
-An optional `exit.php` returns `workflow_result()` to stop (it produces null),
-or an argv list for a handoff:
+Every shipped `exit.php` uses the checked exit constructor:
 
-    return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'poll'];
+    return workflow_exit();        // stop
+    return workflow_exit('poll');  // one-way handoff to an existing workflow
 
 Its first argument must be an absolute executable path. A successful handoff
 uses `pcntl_exec`: same PID, no accumulating child processes, no return to the
@@ -110,32 +110,58 @@ A failed launch exits nonzero but does not restore the completed checkpoint.
     HELLO_CHILD_POLL=1 HELLO_POLL=0 \
       HELLO_CHILD_ITEMS='[3,1,2,4]' HELLO_CHILD_CONCURRENCY=2 php run.php hello
 
-Each item runs an isolated finite poll workflow. `30-map.php` squares the input;
+Each item runs an isolated finite poll workflow. `30-square.php` squares the input;
 hello's `60-reduce.php` sums the results: 30 for this example.
 Defaults: `[1]`, four concurrent workers, a 30-second whole-map timeout.
 An empty map reduces to zero. Items must be integers from -1000000 to 1000000;
 at most 256 items and 1-32 concurrent workers are accepted.
 
-### Child-poll library
+### Explicit map and reduce phases
 
-`child-poll.php` owns poll input validation, job construction, the parallel
-controller call and successful result collection. A single item uses exactly
-the same path as multiple items; there is no separate singular child launcher.
+`workflows/hello/55-child-poll.php` contains only its enable check and visible
+configuration. Standard parsing, input wrapping, mapping and result publication
+live in `workflow_map_into()` from map.php:
 
-The optional workflow node is only an enable check and library call:
+    $items = getenv('HELLO_CHILD_ITEMS');
+    $concurrency = getenv('HELLO_CHILD_CONCURRENCY');
+    return workflow_result(workflow_map_into(
+        state: $state,
+        workflow: 'poll',
+        items: $items === false ? [1] : $items,
+        concurrency: $concurrency === false ? 4 : $concurrency,
+        timeout: 30,
+        environment: ['POLL_ONCE' => '1'],
+        inputField: 'item',
+        resultsField: 'child_poll_results',
+        completedField: 'child_poll_completed'
+    ));
 
-    if (getenv('HELLO_CHILD_POLL') !== '1') {
-        return workflow_result();
-    }
-    require_once dirname(__DIR__, 2) . '/child-poll.php';
-    $error = workflow_child_poll($state);
-    return workflow_result($error);
+The child name, defaults, timeout, finite environment and state field names stay
+at the call site. The library never reads application environment variables.
+Items may be a PHP list or raw JSON list; concurrency may be an integer or
+canonical decimal string (1-32). Each item becomes `['item' => $value]` here.
+Child workflows validate their own domain values; poll requires bounded integers.
 
-Other runner nodes can require the same library and call
-`workflow_child_poll($state)` directly, without copying child management code.
-The library uses `HELLO_CHILD_ITEMS` and `HELLO_CHILD_CONCURRENCY`, defaults
-to one item, and stores `child_poll_results` and `child_poll_completed` only
-after success. Reduction remains a separate application node.
+`workflow_map_into()` checks result-field collisions before launching, validates
+configuration, delegates to workflow_map/parallel, and atomically publishes both
+the ordered results and completion marker after all workers succeed.
+On error, parent state is unchanged. One item uses exactly the same mechanism
+as many; an empty list publishes empty results and a true completion marker.
+
+`60-reduce.php` declares a `workflow_reduce_into()` call with
+`workflow_reduce_sum` and initial accumulator zero. The library reads the
+checkpointed map results, folds them and publishes the total.
+A map failure stops at node 55; reduce never runs with partial results.
+A reduce failure resumes its own input checkpoint without rerunning map.
+
+For callers needing explicit child-state arrays or custom publication, use
+`workflow_map($workflow, $inputs, $concurrency, $timeout, $results, $environment)`.
+It returns ordered final child states without modifying parent state.
+Use workflow_parallel for heterogeneous child workflows.
+
+The filename 55-child-poll.php and child_poll_* fields are retained for existing
+checkpoints. The old root child-poll.php/workflow_child_poll wrapper is removed.
+A reduce node is appropriate here, but not mandatory for every child invocation.
 
 ### Procedural parallel API
 
@@ -207,7 +233,7 @@ Human output is sanitized and width-bounded; JSON preserves recorded metadata.
 ## Examples
 
 Hello: greet, one explicit retry, select approved/rejected branch, finish
-message, optional managed child, exit/handoff. The finish message precedes the
+message, optional map node, reduce node, exit/handoff. The finish message precedes the
 optional child and is not the workflow completion status.
 
 MES observer: see `workflows/mes-observe/README.md`. Its record adapter uses
@@ -217,6 +243,10 @@ the procedural mysqli API, not PDO or Active Record classes.
 
 Run from this directory:
 
+    timeout 30s bash tests/reduce.sh &&
+    timeout 30s bash tests/map-into.sh &&
+    timeout 30s bash tests/map.sh &&
+    timeout 30s bash tests/exit.sh &&
     timeout 30s bash tests/next.sh &&
     timeout 30s bash tests/results.sh &&
     timeout 30s bash tests/state.sh &&
@@ -254,7 +284,7 @@ Saved poll timestamps are preserved; status tables/JSON remain on stdout.
 
 MES and status call `workflow_log_context()` directly; redundant wrappers are removed.
 The parallel library owns worker start/completion messages for both one and
-many children; the poll wrapper does not duplicate them.
+many children; the map node does not duplicate them.
 Helpers return errors without logging; the runner reports each returned failure
 once after cleanup. A child and its parent may report distinct failure events.
 PHP-engine warnings and external child output are outside this logger.
@@ -349,7 +379,7 @@ The runner also validates returned arrays: missing/empty error messages,
 unexpected keys and invalid retry types fail with workflow/node context.
 Construction reduces mistakes but cannot make mutable PHP arrays opaque.
 Use `return workflow_result();` for every explicit node success, including
-disabled/skipped paths and exit.php stopping. Use `workflow_result($error)` for
+disabled/skipped numbered-node paths. Exit nodes use `workflow_exit()` to stop. Use `workflow_result($error)` for
 helper outcomes and `workflow_result($error, retry: $seconds)` for retries.
 Do not mix bare null returns or hand-built control arrays in workflow nodes.
 Helper functions retain their own data/error contracts and may return null.
@@ -381,3 +411,88 @@ The runner revalidates selection as a compatibility boundary for legacy direct
 assignments. Shipped nodes use the helper. Routing is process-local and separate
 from checkpointed application state. Copy next.php into isolated runner fixtures.
 Run `timeout 30s bash tests/next.sh`.
+
+## Checked exit results
+
+`workflow_exit(?string $workflow = null): ?array` lives in result.php.
+Use `return workflow_exit();` to stop and `return workflow_exit('poll');`
+to hand off. Do not build workflow argv or call pcntl_exec inside exit nodes.
+
+The helper validates a simple existing workflow name, readable runner,
+absolute executable PHP file, process-replacement support and finite-job rules.
+Invalid preparation returns a canonical workflow_result error for the runner
+to report, retaining the exit checkpoint. Stop does not require pcntl_exec.
+The helper neither logs nor executes; only the runner removes the checkpoint,
+publishes done, releases the lock and performs process replacement.
+
+Numbered node outcomes still use workflow_result. Exit nodes may forward
+workflow_result errors/retries when doing preparation work, but ordinary
+stop/handoff results use workflow_exit. Helper/data-return contracts are unchanged.
+Legacy raw exit argv remains supported and is revalidated with
+workflow_exit_validate; construction does not make PHP arrays immutable.
+This wrapper deliberately accepts workflow names rather than arbitrary commands.
+CLI timezone forwarding remains unchanged from previous handoff behavior.
+A launch failure after completion cannot restore the deleted checkpoint.
+
+Run `timeout 30s bash tests/exit.sh` for construction and real finite handoff tests.
+
+## Map configuration ownership
+
+Workflow nodes declare application choices: child name, inputs, finite
+environment, concurrency, timeout and publication field names.
+map.php supplies reusable input adaptation and optional guarded publication.
+parallel.php owns isolation, bounded launches, ordered joins and sibling cleanup.
+For heterogeneous workflows use workflow_parallel with explicit per-job names.
+Runtime libraries copied into fixtures are run.php, log.php, state.php,
+result.php, next.php and, when mapping/reducing, map.php, parallel.php and reduce.php.
+Run tests/map-into.sh, tests/map.sh, tests/child.sh and tests/parallel.sh after changing this flow.
+
+## Worker naming and old checkpoints
+
+`workflows/poll/30-square.php` performs one child's calculation. It does not
+launch a map; hello's node 55 owns orchestration and node 60 owns reduction.
+
+This file was previously named `workflows/poll/30-map.php`. A saved poll
+checkpoint referencing that exact old filename cannot resume automatically.
+The runner fails explicitly and retains it; no live checkpoints are rewritten
+or deleted by this rename. Stop the affected runner and archive its checkpoint
+before deliberately updating its node field to `30-square.php`, after verifying
+the workflow and saved state. This also applies to retained isolated job
+checkpoints. The worker's sequence number and calculation are unchanged.
+
+## Reusable reduce
+
+Require reduce.php and make reducer configuration explicit:
+
+    return workflow_result(workflow_reduce_into(
+        state: $state,
+        resultsField: 'child_poll_results',
+        completedField: 'child_poll_completed',
+        outputField: 'child_poll_sum',
+        reducer: 'workflow_reduce_sum',
+        initial: 0
+    ));
+
+The library owns completion checks, ordered iteration, accumulator validation
+and guarded output publication. A skipped map (no marker/results) skips reduce.
+Missing/inconsistent markers, incomplete maps, unordered results and existing
+output fields are errors. Empty maps publish the initial accumulator.
+Parent state is unchanged on expected errors; no partial total is published.
+
+Named reducer functions have this contract:
+
+    function my_reducer(
+        mixed $accumulator, mixed $item, int $index, mixed &$next
+    ): ?string
+
+Set `$next` and return null on success, or return a nonempty error string.
+Use pure reducers: no mutation through references, handles or external effects.
+The library cannot roll back reducer side effects or recover arbitrary runtime
+bugs. Each successful accumulator must be JSON-compatible.
+`workflow_reduce_sum` reads each child's integer `result` and rejects integer
+overflow. Application-specific reducers can implement other folds.
+
+Keep reduce in a separate node so a reduce failure resumes its checkpoint
+without replaying successful map work. Workflow nodes retain application
+summaries; the reduce library neither logs nor chooses application fields.
+Run `timeout 30s bash tests/reduce.sh`.

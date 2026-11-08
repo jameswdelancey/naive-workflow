@@ -1,10 +1,11 @@
 <?php
-// Opt in to process replacement; ordinary hello runs still finish and stop.
+// Stop unless a one-way workflow handoff is explicitly enabled.
 if (getenv('HELLO_POLL') !== '1') {
-    return workflow_result();
+    return workflow_exit();
 }
 
-// The runner completes hello, releases its lock, then replaces itself with poll.
-// This is a handoff, not a function call: execution never returns to hello.
-workflow_log_context('hello', "Handing off to poll.");
-return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'poll'];
+$handoff = workflow_exit('poll');
+if (is_array($handoff) && array_is_list($handoff)) {
+    workflow_log_context('hello', 'Handing off to poll.');
+}
+return $handoff;

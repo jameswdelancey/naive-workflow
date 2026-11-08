@@ -21,6 +21,7 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copy2(source / "state.php", root / "state.php")
     shutil.copy2(source / "result.php", root / "result.php")
     shutil.copy2(source / "next.php", root / "next.php")
+    shutil.copy2(source / "reduce.php", root / "reduce.php")
     shutil.copytree(source / "workflows/hello", root / "workflows/hello")
     shutil.copytree(source / "workflows/poll", root / "workflows/poll")
 

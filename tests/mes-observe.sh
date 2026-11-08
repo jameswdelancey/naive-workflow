@@ -18,6 +18,7 @@ cp "$root/log.php" "$temporary/log.php"
 cp "$root/state.php" "$temporary/state.php"
 cp "$root/result.php" "$temporary/result.php"
 cp "$root/next.php" "$temporary/next.php"
+cp "$root/reduce.php" "$temporary/reduce.php"
 cp -R "$root/workflows/mes-observe" "$temporary/workflows/"
 cat > "$temporary/workflows/mes-observe/records.php" <<'PHP'
 <?php
