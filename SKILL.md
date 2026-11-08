@@ -7,7 +7,7 @@ description: Migrate scripts and services into procedural PHP workflows.
 
 Read README.md, run.php, relevant helper libraries and the application before
 changing behavior. README.md documents runtime/API behavior; this file adds
-migration policy. Preserve application requirements and checkpoint compatibility.
+migration policy. Preserve application requirements.
 Use named functions, plain arrays and explicit error returns. Do not introduce
 application classes, closures or exception-based control flow.
 
@@ -117,14 +117,6 @@ A failed/replayed map creates a fresh batch; completed effects may repeat.
 Use stable application keys, not batch paths, for deduplication.
 Retained artifacts need an operator cleanup policy; status.php lists ordinary
 runs, not isolated jobs. Remove batches only after confirming they are unused.
-
-# Compatibility
-
-Retain hello/55-child-poll.php and child_poll_* fields for existing checkpoints.
-The root child-poll.php/workflow_child_poll wrapper was removed in favor of generic
-map APIs. Poll's worker moved from 30-map.php to 30-square.php.
-Old checkpoints naming that file fail explicitly and remain retained; migrate
-only stopped instances after inspection/archive. Never silently start fresh.
 
 # Diagnostics
 

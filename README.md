@@ -75,9 +75,6 @@ data/error contracts: generally null on success, an error string on failure,
 with output arguments where needed. Check errors immediately and convert them
 with workflow_result only at the node boundary. Cleanup precedes return.
 
-Raw null and implicit numbered-file success remain runtime compatibility,
-not the convention for new nodes. Exit-node stop/handoff uses workflow_exit.
-
 ## Guarded state
 
 Nodes share a JSON-compatible `$state` array:
@@ -123,7 +120,6 @@ it before each attempt, applies it only after success, and ignores it on retry
 or failure. No selection means fall-through, not completion.
 Branch endpoints must skip unwanted alternatives. Bound and pace backward/self
 branches and check shutdown requests. exit.php cannot select a sequence.
-Legacy direct selector assignments are revalidated but should not be used.
 
 ## Checkpoints, retries and completion
 
@@ -168,7 +164,6 @@ No state is transferred. A target uses its own checkpoint and lock.
 A launch failure after completion cannot restore the removed checkpoint.
 CLI `-d` settings are not automatically forwarded by workflow_exit.
 
-Legacy raw exit argv is still revalidated at the runner boundary.
 Do not construct workflow argv or call pcntl_exec inside new nodes.
 Finite job-mode workflows must stop and cannot hand off.
 
@@ -277,18 +272,6 @@ so a reduce failure can resume without rerunning successful map work.
 A failed/replayed map creates a fresh batch and may repeat completed workers.
 Use stable application idempotency keys, not generated batch names.
 A separate reduce is useful here, not mandatory for all child invocations.
-
-### Existing checkpoints
-
-Keep hello's 55-child-poll.php filename and child_poll_* fields for compatibility.
-The old root child-poll.php/workflow_child_poll wrapper was removed; callers now
-use explicit generic map APIs.
-
-Poll's worker was renamed from 30-map.php to 30-square.php.
-Checkpoints naming the old file fail explicitly and remain retained.
-Stop affected processes, inspect/archive saved state and deliberately migrate
-the filename only after verifying compatibility. This includes isolated jobs.
-No automatic live checkpoint rewrite or restart is performed.
 
 ## Diagnostics and status
 
