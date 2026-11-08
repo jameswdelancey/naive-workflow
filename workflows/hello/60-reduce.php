@@ -1,16 +1,32 @@
 <?php
-if (!($state['child_poll_completed'] ?? false)) {
+if (!array_key_exists('child_poll_completed', $state)) {
     return null;
 }
-
-// Reduce only after every mapper succeeds.
-$sum = 0;
-foreach ($state['child_poll_results'] as $mapped) {
-    if (!is_int($mapped['result'] ?? null)) {
-        return ['error' => 'Missing integer map result'];
-    }
-    $sum += $mapped['result'];
+$error = workflow_state_get($state, 'child_poll_completed', $completed, 'bool');
+if ($error !== null) {
+    return ['error' => $error];
 }
-$state['child_poll_sum'] = $sum;
-fwrite(STDERR, '[' . date('c') . '] ' . "Reduced child poll results: $sum.\n");
+if (!$completed) {
+    return null;
+}
+$error = workflow_state_get($state, 'child_poll_results', $results, 'array');
+if ($error !== null) {
+    return ['error' => $error];
+}
+$sum = 0;
+foreach ($results as $index => $mapped) {
+    if (!is_array($mapped)) {
+        return ['error' => "Map result $index must be an array"];
+    }
+    $error = workflow_state_get($mapped, 'result', $value, 'int');
+    if ($error !== null) {
+        return ['error' => "Map result $index: $error"];
+    }
+    $sum += $value;
+}
+$error = workflow_state_set($state, 'child_poll_sum', $sum, 'add');
+if ($error !== null) {
+    return ['error' => $error];
+}
+workflow_log_context('hello', "Reduced child poll results: $sum.");
 return null;

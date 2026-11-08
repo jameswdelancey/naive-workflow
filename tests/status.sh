@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset WORKFLOW_LOG_LEVEL WORKFLOW_LOG_FORMAT
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python3 - "$root" <<'PY'
@@ -16,6 +17,8 @@ import tempfile
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     shutil.copy2(Path(sys.argv[1]) / "status.php", root / "status.php")
+    shutil.copy2(Path(sys.argv[1]) / "log.php", root / "log.php")
+    shutil.copy2(Path(sys.argv[1]) / "state.php", root / "state.php")
     (root / "workflows/demo").mkdir(parents=True)
     (root / "workflows/invalid name").mkdir()
     (root / ".runs").mkdir()

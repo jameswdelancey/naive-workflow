@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset WORKFLOW_LOG_LEVEL WORKFLOW_LOG_FORMAT
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 - "$root" <<'PYTEST'
 import json
@@ -15,6 +16,8 @@ with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     source = Path(sys.argv[1])
     shutil.copy2(source / "run.php", root / "run.php")
+    shutil.copy2(source / "log.php", root / "log.php")
+    shutil.copy2(source / "state.php", root / "state.php")
     shutil.copy2(source / "parallel.php", root / "parallel.php")
     shutil.copy2(source / "child-poll.php", root / "child-poll.php")
     for name in ("hello", "poll"):
@@ -44,8 +47,8 @@ with tempfile.TemporaryDirectory() as tmp:
     sys.stderr.write(err)
     assert code == 0 and out == "", (code, out, err)
     assert err.count(" polling\n") == 1
-    assert err.index("Starting child workflow poll.") < err.index(" polling\n")
-    assert err.index(" polling\n") < err.index("Child workflow poll completed; continuing hello.")
+    assert err.index("Starting child workflow poll (job 0).") < err.index(" polling\n")
+    assert err.index(" polling\n") < err.index("Child workflow poll (job 0) completed.")
 
     hello = json.loads((root / ".runs/hello.json").read_text())
     job = next((root / ".runs/hello/parallel").glob("batch-*/job-0"))

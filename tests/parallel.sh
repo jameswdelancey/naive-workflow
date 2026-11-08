@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset WORKFLOW_LOG_LEVEL WORKFLOW_LOG_FORMAT
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 python3 - "$root" <<'PYTEST'
 import json
@@ -15,7 +16,7 @@ import time
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     source = Path(sys.argv[1])
-    for name in ("run.php", "parallel.php", "child-poll.php"):
+    for name in ("run.php", "log.php", "state.php", "parallel.php", "child-poll.php"):
         shutil.copy2(source / name, root / name)
     for name in ("hello", "poll"):
         shutil.copytree(source / "workflows" / name, root / "workflows" / name)
@@ -25,6 +26,9 @@ with tempfile.TemporaryDirectory() as directory:
     env = dict(os.environ, HELLO_CHILD_POLL="1", HELLO_POLL="0",
                HELLO_CHILD_ITEMS="[3,1,2,4]", HELLO_CHILD_CONCURRENCY="2",
                HELLO_APPROVED="1", POLL_ONCE="1")
+    (root / "workflows/poll/fields.php").write_text(
+        "<?php\nreturn ['time'=>'string','item'=>'int','result'=>'int','pid'=>'int','began'=>'float','ended'=>'float'];\n"
+    )
     wait_node = root / "workflows/poll/20-wait.php"
     wait_node.write_text("""<?php
 $state['pid'] = getmypid();
@@ -85,7 +89,7 @@ $state['ended'] = microtime(true);
         active += delta
         peak = max(peak, active)
     assert peak == 2, peak
-    assert err.index("Child workflow poll completed") < err.index("Reduced child poll results")
+    assert err.index("Child workflow poll (job 0) completed.") < err.index("Reduced child poll results")
     assert not (root / ".runs/poll.json").exists()
 
     env["HELLO_CHILD_ITEMS"] = "[]"

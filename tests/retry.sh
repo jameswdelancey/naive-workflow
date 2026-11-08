@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset WORKFLOW_LOG_LEVEL WORKFLOW_LOG_FORMAT
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 tmp="$(mktemp -d)"
@@ -15,7 +16,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$tmp/workflows"
-cp -- "$root/run.php" "$root/status.php" "$tmp/"
+cp -- "$root/run.php" "$root/status.php" "$root/log.php" "$root/state.php" "$tmp/"
 cp -R -- "$root/workflows/hello" "$tmp/workflows/"
 
 fail() {
@@ -111,7 +112,7 @@ php -r '$state = []; require $argv[1];' \
 
 [[ ! -s "$tmp/poll.stdout" ]] || fail "poll output leaked to stdout"
 [[ "$(wc -l < "$tmp/poll.log")" == 1 ]] || fail "unexpected poll output"
-grep -Eq '^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}\] polling$' \
+grep -Eq '^\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}\] poll: polling$' \
     "$tmp/poll.log" || fail "poll stderr timestamp missing"
 
 printf 'PASS: hello and poll messages use timestamped stderr; stdout remains empty\n'

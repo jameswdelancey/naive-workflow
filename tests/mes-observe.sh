@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset WORKFLOW_LOG_LEVEL WORKFLOW_LOG_FORMAT
 root=$(cd "$(dirname "$0")/.." && pwd)
 temporary=$(mktemp -d)
 pid=
@@ -13,6 +14,8 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$temporary/workflows"
 cp "$root/run.php" "$temporary/run.php"
+cp "$root/log.php" "$temporary/log.php"
+cp "$root/state.php" "$temporary/state.php"
 cp -R "$root/workflows/mes-observe" "$temporary/workflows/"
 cat > "$temporary/workflows/mes-observe/records.php" <<'PHP'
 <?php

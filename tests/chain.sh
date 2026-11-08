@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset WORKFLOW_LOG_LEVEL WORKFLOW_LOG_FORMAT
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 python3 - "$root" <<'PYTEST'
@@ -16,6 +17,8 @@ source = Path(sys.argv[1])
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     shutil.copy2(source / "run.php", root / "run.php")
+    shutil.copy2(source / "log.php", root / "log.php")
+    shutil.copy2(source / "state.php", root / "state.php")
     shutil.copytree(source / "workflows/hello", root / "workflows/hello")
     shutil.copytree(source / "workflows/poll", root / "workflows/poll")
 

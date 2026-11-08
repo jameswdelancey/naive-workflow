@@ -1,6 +1,10 @@
 <?php
 global $nextSequence;
-$state['approved'] = getenv('HELLO_APPROVED') === '1';
-// Select one branch after this node succeeds.
-$nextSequence = $state['approved'] ? 30 : 40;
-fwrite(STDERR, '[' . date('c') . '] ' . "Choosing node $nextSequence.\n");
+$approved = getenv('HELLO_APPROVED') === '1';
+$error = workflow_state_set($state, 'approved', $approved, 'add');
+if ($error !== null) {
+    return ['error' => $error];
+}
+$nextSequence = $approved ? 30 : 40;
+workflow_log_context('hello', "Choosing node $nextSequence.");
+return null;

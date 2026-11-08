@@ -149,3 +149,42 @@ It returns an error string or null and uses workflow_parallel even for one job.
 Keep workflow nodes thin: optional enable check, library call, error conversion.
 Do not duplicate input validation, process launching, waiting or cleanup there.
 For non-poll workflows, use workflow_parallel directly with explicit job inputs.
+
+# Shared diagnostics
+
+Use workflow_log($message), not repeated timestamp formatting and stderr writes.
+The runner loads log.php. Standalone nodes/tools should require_once log.php
+directly. An optional timestamp argument preserves a saved event time.
+Copy log.php alongside run.php in isolated fixtures.
+
+# Diagnostic ownership
+
+Use workflow_log_context($context, $message) for contextual diagnostics.
+log.php owns the sole stderr writer; MES/status use direct context calls.
+The parallel controller owns worker lifecycle messages for every group size;
+do not duplicate them in workflow nodes or poll wrappers.
+Return helper errors without logging; the runner reports failures after cleanup.
+Child and parent failures are distinct diagnostic events.
+Keep application message text local rather than adding trivial wrappers.
+Run tests/logging.sh after changing diagnostics or runtime-copy fixtures.
+
+# Diagnostic levels and identity
+
+Routine messages default to info; retries use warning; failures must use error.
+WORKFLOW_LOG_LEVEL controls filtering; WORKFLOW_LOG_FORMAT=json emits NDJSON to
+stderr without changing report stdout. The runner supplies workflow/node and
+isolated job/batch identity; never infer identity from inherited environment labels.
+Use workflow_error(operation, message, path) at failure boundaries, then return
+the error without logging. Avoid secrets in diagnostic strings and JSON fields.
+Run tests/logging-options.sh alongside tests/logging.sh.
+
+# Guarded state
+
+Use workflow_state_get/set/remove from state.php and check returned errors.
+New fields require add; replacement rejects missing fields and type changes.
+Missing removal is an error. Use explicit nested path lists; never invent parents.
+Declare top-level names/types in fields.php; the runner validates input/output.
+Guard reads for prerequisites and validate nested application invariants.
+Use local copies for multi-field commits. Avoid references, resources and objects.
+For intentional loops, replace existing fields explicitly.
+Run tests/state.sh and copy state.php alongside the runner in fixtures.

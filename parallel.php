@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/log.php';
+
 function workflow_parallel_signal(int $signal): void
 {
     $GLOBALS['workflowParallelStop'] = true;
@@ -78,22 +80,22 @@ function workflow_parallel(
     // Retain artifacts for inspection; never reuse another batch.
     $base = "$runs/$name/parallel";
     if (!is_dir($base) && !@mkdir($base, 0700, true) && !is_dir($base)) {
-        return 'Cannot create parallel runtime directory';
+        return workflow_error('mkdir parallel runtime', 'Cannot create parallel runtime directory', $base);
     }
     $batch = $base . '/batch-' . uniqid('', false);
     if (!@mkdir($batch, 0700)) {
-        return 'Cannot create parallel batch';
+        return workflow_error('mkdir parallel batch', 'Cannot create parallel batch', $batch);
     }
     foreach ($jobs as $index => $job) {
         if (!@mkdir("$batch/job-$index", 0700)) {
-            return "Cannot create parallel job $index";
+            return workflow_error("mkdir job $index", "Cannot create parallel job $index", "$batch/job-$index");
         }
         $error = workflow_write("$batch/job-$index/input.json", $job['state']);
         if ($error !== null) {
             return $error;
         }
     }
-    workflow_log("$name: parallel batch $batch");
+    workflow_log_context($name, "parallel batch $batch");
 
     $GLOBALS['workflowParallelStop'] = false;
     $async = pcntl_async_signals();
@@ -140,15 +142,19 @@ function workflow_parallel(
             }
             $json = @file_get_contents("$batch/job-$index/output.json", false, null, 0, 8_388_609);
             if ($json === false || strlen($json) > 8_388_608) {
-                $error = "Missing or oversized output from job $index";
+                $error = workflow_error("read job $index output", "Missing or oversized output from job $index", "$batch/job-$index/output.json");
                 break;
             }
             $value = json_decode($json, true);
             if (json_last_error() !== JSON_ERROR_NONE || !is_array($value)) {
-                $error = "Invalid output from job $index";
+                $error = workflow_error("decode job $index output", "Invalid output from job $index", "$batch/job-$index/output.json");
                 break;
             }
             $mapped[$index] = $value;
+            workflow_log_context(
+                $name,
+                "Child workflow {$jobs[$index]['workflow']} (job $index) completed."
+            );
         }
         if ($error !== null) {
             break;
@@ -169,13 +175,17 @@ function workflow_parallel(
                 __DIR__ . '/run.php', $job['workflow'],
                 '--job-dir', "$batch/job-$next",
             ];
+            workflow_log_context(
+                $name,
+                "Starting child workflow {$job['workflow']} (job $next)."
+            );
             $process = @proc_open($command, [
                 0 => ['file', '/dev/null', 'r'],
                 1 => STDOUT,
                 2 => STDERR,
             ], $pipes, __DIR__, $env);
             if (!is_resource($process)) {
-                $error = "Cannot start parallel job $next";
+                $error = workflow_error("launch job $next ({$job['workflow']})", "Cannot start parallel job $next", "$batch/job-$next");
                 break;
             }
             $active[$next] = $process;
@@ -196,6 +206,7 @@ function workflow_parallel(
     }
     pcntl_async_signals($async);
     if ($error !== null) {
+        // Return failures; the runner reports them after cleanup.
         return "$error; batch retained at $batch";
     }
     ksort($mapped, SORT_NUMERIC);

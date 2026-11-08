@@ -2,28 +2,23 @@
 <?php
 declare(strict_types=1);
 
-function status_diagnose(string $message): void
-{
-    $message = str_replace(["\r", "\n"], ['\\r', '\\n'], $message);
-    fwrite(STDERR, '[' . date('c') . '] ' . "status: $message\n");
-}
+require_once __DIR__ . '/log.php';
 
-// Read contents and mtime from one snapshot.
 function status_read(string $file, array &$last, ?string &$updatedAt): ?string
 {
     $handle = @fopen($file, 'rb');
     if ($handle === false) {
-        return "Cannot open $file";
+        return workflow_error('open status', 'Cannot open status snapshot', $file);
     }
     $metadata = fstat($handle);
     $json = @stream_get_contents($handle);
     fclose($handle);
     if ($metadata === false) {
-        return "Cannot stat $file";
+        return workflow_error('stat status', 'Cannot stat status snapshot', $file);
     }
     $updatedAt = date('c', $metadata['mtime']);
     if ($json === false) {
-        return "Cannot read $file";
+        return workflow_error('read status', 'Cannot read status snapshot', $file);
     }
     $saved = json_decode($json, true);
     if (json_last_error() !== JSON_ERROR_NONE ||
@@ -32,7 +27,7 @@ function status_read(string $file, array &$last, ?string &$updatedAt): ?string
         !is_int($saved['pid'] ?? null) || $saved['pid'] <= 0 ||
         !array_key_exists('node', $saved) ||
         ($saved['node'] !== null && !is_string($saved['node']))) {
-        return "Invalid status fields in $file";
+        return workflow_error('validate status', 'Invalid status fields', $file);
     }
     foreach (['started', 'finished', 'retry_at', 'error', 'retry_error'] as $field) {
         if (array_key_exists($field, $saved) && !is_string($saved[$field])) {
@@ -70,7 +65,7 @@ foreach (glob(__DIR__ . '/workflows/*', GLOB_ONLYDIR) ?: [] as $dir) {
         if ($error !== null) {
             $status = 'unknown';
             $hadErrors = true;
-            status_diagnose("$name: $error");
+            workflow_log_context("status: $name", $error, null, 'error');
         } else {
             $status = $last['status'];
         }
@@ -91,7 +86,7 @@ foreach (glob(__DIR__ . '/workflows/*', GLOB_ONLYDIR) ?: [] as $dir) {
 if (in_array('--json', $argv, true)) {
     $json = json_encode($rows, JSON_PRETTY_PRINT);
     if ($json === false) {
-        status_diagnose('Cannot encode report: ' . json_last_error_msg());
+        workflow_log_context('status', workflow_error('encode report', json_last_error_msg()), null, 'error');
         echo "[]\n";
         exit(1);
     }

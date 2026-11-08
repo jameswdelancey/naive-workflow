@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/log.php';
+require_once __DIR__ . '/state.php';
 require_once __DIR__ . '/parallel.php';
 
 // One item and many items use the same parallel controller.
@@ -31,14 +33,20 @@ function workflow_child_poll(array &$state): ?string
     }
     $concurrency = $raw === false ? 4 : (int) $raw;
 
-    fwrite(STDERR, '[' . date('c') . '] ' . "Starting child workflow poll.\n");
     $results = [];
     $error = workflow_parallel($jobs, $concurrency, 30, $results);
     if ($error !== null) {
         return $error;
     }
-    $state['child_poll_results'] = $results;
-    $state['child_poll_completed'] = true;
-    fwrite(STDERR, '[' . date('c') . '] ' . "Child workflow poll completed; continuing hello.\n");
+    // Publish related fields only after both updates succeed.
+    $updated = $state;
+    $error = workflow_state_set($updated, 'child_poll_results', $results, 'add');
+    if ($error === null) {
+        $error = workflow_state_set($updated, 'child_poll_completed', true, 'add');
+    }
+    if ($error !== null) {
+        return $error;
+    }
+    $state = $updated;
     return null;
 }

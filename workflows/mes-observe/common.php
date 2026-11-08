@@ -1,13 +1,9 @@
 <?php
 declare(strict_types=1);
 
-function mes_log(string $message): void
-{
-    $message = str_replace(["\r", "\n"], ['\\r', '\\n'], $message);
-    fwrite(STDERR, '[' . date('c') . '] ' . $message . "\n");
-}
+require_once dirname(__DIR__, 2) . '/log.php';
+require_once dirname(__DIR__, 2) . '/state.php';
 
-// Parse a bounded positive environment value.
 function mes_integer(string $name, int $default, int $maximum, ?string &$error): ?int
 {
     $raw = getenv($name);
@@ -180,9 +176,15 @@ function mes_baseline(array &$state): ?string
         $error = mes_check_work($state);
     }
     if ($error === null) {
-        $state['baseline'] = $records;
-        $state['armed_at'] = date('c');
-        mes_log('Baselines captured; waiting for a production-order upsert, then a quality-check upsert');
+        $updated = $state;
+        $error = workflow_state_set($updated, 'baseline', $records, 'add');
+        if ($error === null) {
+            $error = workflow_state_set($updated, 'armed_at', date('c'), 'add');
+        }
+        if ($error === null) {
+            $state = $updated;
+            workflow_log_context('mes-observe', 'Baselines captured; waiting for a production-order upsert, then a quality-check upsert');
+        }
     }
     mes_end($handlers, $async);
     return $error;
@@ -217,11 +219,13 @@ function mes_poll(array &$state, string $table, int $sequence): ?string
         $changed = mes_changed($state['baseline'][$table], $current, $error);
     }
     if ($error === null && $changed) {
-        $state['observed'][$table] = [
+        $error = workflow_state_set($state, ['observed', $table], [
             'record' => $current,
             'observed_at' => date('c'),
-        ];
-        mes_log("$table: observed $id at revision {$current['row_version']}");
+        ], 'add');
+        if ($error === null) {
+            workflow_log_context('mes-observe', "$table: observed $id at revision {$current['row_version']}");
+        }
     } elseif ($error === null) {
         $until = hrtime(true) + $state['config']['interval'] * 1_000_000_000;
         while (hrtime(true) < $until) {

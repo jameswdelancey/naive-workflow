@@ -226,3 +226,95 @@ a live database. Bash, Python 3 and PHP CLI are required; process composition
 also requires pcntl and enabled process functions. Live MySQL, production
 network behavior, comprehensive signal/timeout recovery, descendant cleanup
 and exactly-once effects are not established by these tests.
+
+## Shared logging
+
+The runner and hello/poll demos use `workflow_log($message)` from `log.php`.
+Pass an optional second argument to preserve an event's saved timestamp.
+The logger escapes embedded CR/LF and writes one timestamped stderr line.
+Require log.php directly for standalone nodes/tools; do not require run.php
+just to load functions. Include log.php when copying the runner into fixtures.
+
+## Diagnostic ownership
+
+`log.php` is the sole application stderr writer.
+`workflow_log_context($context, $message, $timestamp = null)` adds a consistent
+prefix before sanitizing the complete line. Hello uses `hello`, poll uses
+`poll`, MES uses `mes-observe`, and status uses `status`.
+Saved poll timestamps are preserved; status tables/JSON remain on stdout.
+
+MES and status call `workflow_log_context()` directly; redundant wrappers are removed.
+The parallel library owns worker start/completion messages for both one and
+many children; the poll wrapper does not duplicate them.
+Helpers return errors without logging; the runner reports each returned failure
+once after cleanup. A child and its parent may report distinct failure events.
+PHP-engine warnings and external child output are outside this logger.
+
+Application messages such as greetings, branch decisions and reduced totals
+remain at their call sites rather than gaining one-purpose wrappers.
+
+Run `timeout 30s bash tests/logging.sh` for writer ownership, sanitization,
+saved timestamps, clean JSON and failure-message duplication checks.
+
+## Diagnostic options
+
+- `WORKFLOW_LOG_LEVEL=debug|info|warning|error`: minimum severity; default info.
+  Error mode suppresses routine ticks, worker lifecycle and application messages,
+  but never failures. Retry diagnostics are warnings. Unknown levels use info.
+- `WORKFLOW_LOG_FORMAT=json`: newline-delimited JSON on stderr; otherwise text.
+  Fields: timestamp, level, context, message, workflow, job, batch, pid, node.
+  JSON preserves message newlines as escaped characters and replaces invalid UTF-8.
+  Status report stdout is independent of diagnostic format.
+- Existing workflow_log/workflow_log_context calls default to info. Pass a fourth
+  argument to workflow_log_context to select severity, e.g.
+  `workflow_log_context('fetch', $error, null, 'error')`.
+
+The runner derives job/batch labels from its actual job directory, not inherited
+labels. Text worker diagnostics include job, batch and PID; JSON always includes
+PID, plus workflow/node identity when running under the runner.
+Controller lifecycle messages remain in the parent's context and identify the job.
+These fields are diagnostic hints, not authenticated process identities.
+
+`workflow_error($operation, $message, $path = null)` builds an error string
+without logging. File/JSON/job failures include their operation and relevant path.
+Record query failures identify the table. Do not pass passwords, full DSNs or
+environment dumps; connection failures report a numeric driver code.
+The runner remains responsible for logging returned errors after cleanup.
+
+Run `timeout 30s bash tests/logging-options.sh` for level/JSON/identity/error tests.
+
+## Guarded state
+
+The runner loads state.php. Standalone tools should require it directly.
+
+    $error = workflow_state_set($state, 'name', 'Ada', 'add');
+    $error = workflow_state_get($state, 'name', $name, 'string');
+    $error = workflow_state_set($state, 'name', 'Grace');
+    $error = workflow_state_remove($state, 'name');
+
+Check each returned error; nodes return `['error' => $error]`.
+Set defaults to replacing an existing key without changing its concrete type.
+Adding requires explicit `add` and rejects existing keys. Removal rejects
+missing keys. Nested paths use explicit lists, e.g. `['observed', $table]`;
+missing/non-array parents are errors, never silently created.
+Get distinguishes missing from present-null and optionally checks a type.
+Errors identify the field path and types, not stored values.
+For related updates, use a local copy and commit only after all checks succeed.
+Do not store PHP references in state; these helpers operate on ordinary
+JSON-compatible arrays, not aliases to external mutable variables.
+
+Shipped workflows declare allowed top-level names/types in fields.php.
+The runner checks restored input and node output before retry/advance,
+including writes that bypass helpers. Fields may be absent until a node needs
+them; use guarded reads for prerequisites. Nested invariants remain application
+responsibilities. No fields.php retains open-field compatibility.
+This is runtime validation, not a sandbox or immutable-state guarantee.
+
+State cannot contain objects/resources, nonfinite numbers, invalid UTF-8 or
+recursive arrays; nesting is limited to 64. Failures retain attempt input.
+Nullable declarations permit null, but replacement still rejects concrete
+type changes; remove then add only for intentional type transitions.
+Branch loops must explicitly replace existing fields rather than re-add them.
+
+Copy state.php into isolated runner fixtures.
+Run `timeout 30s bash tests/state.sh` alongside the regression suite.

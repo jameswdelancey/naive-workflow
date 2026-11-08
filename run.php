@@ -2,27 +2,24 @@
 <?php
 declare(strict_types=1);
 
-function workflow_log(string $message): void
-{
-    $message = str_replace(["\r", "\n"], ['\\r', '\\n'], $message);
-    fwrite(STDERR, '[' . date('c') . '] ' . $message . "\n");
-}
+require_once __DIR__ . '/log.php';
+require_once __DIR__ . '/state.php';
 
 // Return an error string, or null on success.
 function workflow_write(string $path, array $data): ?string
 {
     $json = json_encode($data, JSON_PRETTY_PRINT);
     if ($json === false) {
-        return 'Cannot encode checkpoint/status: ' . json_last_error_msg();
+        return workflow_error('encode JSON', json_last_error_msg(), $path);
     }
     $json .= "\n";
     if (@file_put_contents("$path.tmp", $json) !== strlen($json)) {
         @unlink("$path.tmp");
-        return "Cannot write $path";
+        return workflow_error('write JSON', 'Cannot write snapshot', $path);
     }
     if (!@rename("$path.tmp", $path)) {
         @unlink("$path.tmp");
-        return "Cannot publish $path";
+        return workflow_error('rename JSON', 'Cannot publish snapshot', $path);
     }
     return null;
 }
@@ -59,9 +56,13 @@ function workflow_fail(string $message): void
     $status['error'] = $message;
     $status['finished'] = date('c');
     $saveError = workflow_save();
-    workflow_log("$name: $message");
+    $context = $name;
+    if (is_string($status['node'] ?? null)) {
+        $context .= ': ' . $status['node'];
+    }
+    workflow_log_context($context, $message, null, 'error');
     if ($saveError !== null) {
-        workflow_log("$name: $saveError");
+        workflow_log_context($context, $saveError, null, 'error');
     }
     $workflowFinished = true;
     workflow_release();
@@ -82,7 +83,11 @@ function workflow_shutdown(): void
     $status['error'] = $message;
     $status['finished'] = date('c');
     workflow_save();
-    workflow_log("$name: $message");
+    $context = $name;
+    if (is_string($status['node'] ?? null)) {
+        $context .= ': ' . $status['node'];
+    }
+    workflow_log_context($context, $message, null, 'error');
     workflow_release();
 }
 
@@ -97,7 +102,7 @@ $root = __DIR__;
 $name = $argv[1] ?? '';
 if (!preg_match('/^[a-zA-Z0-9_-]+$/D', $name) ||
     !is_dir("$root/workflows/$name")) {
-    workflow_log('Usage: php run.php <workflow>');
+    workflow_log('Usage: php run.php <workflow>', null, 'error');
     exit(1);
 }
 
@@ -107,25 +112,31 @@ $jobDir = null;
 if (count($argv) !== 2) {
     if (count($argv) !== 4 || $argv[2] !== '--job-dir' ||
         !str_starts_with($argv[3], '/') || !is_dir($argv[3])) {
-        workflow_log('Usage: php run.php <workflow> [--job-dir <absolute-directory>]');
+        workflow_log('Usage: php run.php <workflow> [--job-dir <absolute-directory>]', null, 'error');
         exit(1);
     }
     $jobDir = realpath($argv[3]);
     if ($jobDir === false) {
-        workflow_log('Cannot resolve job directory');
+        workflow_log('Cannot resolve job directory', null, 'error');
         exit(1);
     }
 }
+// Derive identity from the invocation, not inherited environment labels.
+$GLOBALS['workflowLogIdentity'] = ['workflow' => $name, 'node' => null];
+if ($jobDir !== null) {
+    $GLOBALS['workflowLogIdentity']['job'] = basename($jobDir);
+    $GLOBALS['workflowLogIdentity']['batch'] = basename(dirname($jobDir));
+}
 $runs = $jobDir === null ? "$root/.runs" : "$jobDir/runtime";
 if (!is_dir($runs) && !@mkdir($runs, 0700, true) && !is_dir($runs)) {
-    workflow_log("Cannot create $runs");
+    workflow_log("Cannot create $runs", null, 'error');
     exit(1);
 }
 
 // Allow one active runner per workflow.
 $lock = @fopen("$runs/$name.lock", 'c');
 if ($lock === false || !flock($lock, LOCK_EX | LOCK_NB)) {
-    workflow_log("$name: already running or cannot acquire lock");
+    workflow_log_context($name, 'already running or cannot acquire lock', null, 'error');
     exit(1);
 }
 
@@ -160,16 +171,17 @@ $next = null;
 if (is_file($checkpoint)) {
     $json = @file_get_contents($checkpoint);
     if ($json === false) {
-        workflow_fail('Cannot read checkpoint');
+        workflow_fail(workflow_error('read checkpoint', 'Cannot read checkpoint', $checkpoint));
     }
     $saved = json_decode($json, true);
     if (json_last_error() !== JSON_ERROR_NONE ||
         !is_array($saved) ||
         !is_string($saved['node'] ?? null) ||
         !is_array($saved['state'] ?? null)) {
-        workflow_fail('Invalid checkpoint');
+        workflow_fail(workflow_error('decode checkpoint', 'Invalid checkpoint', $checkpoint));
     }
     $status['node'] = $saved['node'];
+    $GLOBALS['workflowLogIdentity']['node'] = $saved['node'];
     $position = array_search($saved['node'], $steps, true);
     if ($position === false) {
         workflow_fail("Checkpoint node is missing: {$saved['node']}");
@@ -179,26 +191,38 @@ if (is_file($checkpoint)) {
     if ($retryAt !== null && (!is_int($retryAt) || $retryAt < 0)) {
         workflow_fail('Invalid checkpoint retry deadline');
     }
-    workflow_log("$name: resuming {$saved['node']}");
+    workflow_log_context($name, "resuming {$saved['node']}");
 }
 
 if ($jobDir !== null) {
     // Exit code and output must both belong to this invocation.
     if (file_exists("$jobDir/output.json") && !@unlink("$jobDir/output.json")) {
-        workflow_fail('Cannot remove stale job output');
+        workflow_fail(workflow_error('unlink job output', 'Cannot remove stale job output', "$jobDir/output.json"));
     }
     if (!is_file($checkpoint)) {
         $input = @file_get_contents("$jobDir/input.json");
         if ($input === false) {
-            workflow_fail('Cannot read job input');
+            workflow_fail(workflow_error('read job input', 'Cannot read job input', "$jobDir/input.json"));
         }
         $state = json_decode($input, true);
         if (json_last_error() !== JSON_ERROR_NONE || !is_array($state)) {
-            workflow_fail('Invalid job input');
+            workflow_fail(workflow_error('decode job input', 'Invalid job input', "$jobDir/input.json"));
         }
     }
 }
 
+// Validate restored input before executing a node.
+$fields = null;
+if (is_file("$dir/fields.php")) {
+    $fields = workflow_include("$dir/fields.php", $state);
+    if (!is_array($fields)) {
+        workflow_fail("fields.php must return a field-to-type array: $dir/fields.php");
+    }
+}
+$error = workflow_state_validate($state, $fields);
+if ($error !== null) {
+    workflow_fail($error);
+}
 $error = workflow_save();
 if ($error !== null) {
     workflow_fail($error);
@@ -207,6 +231,7 @@ if ($error !== null) {
 while ($position < count($steps)) {
     $node = $steps[$position];
     $status['node'] = $node;
+    $GLOBALS['workflowLogIdentity']['node'] = $node;
 
     while (true) {
         if ($retryAt !== null) {
@@ -238,6 +263,10 @@ while ($position < count($steps)) {
 
         // Run with shared state and an explicit result.
         $result = workflow_include("$dir/$node", $state);
+        $error = workflow_state_validate($state, $fields);
+        if ($error !== null) {
+            workflow_fail("Node $node produced invalid state: $error");
+        }
 
         // Retries preserve mutations; failures preserve attempt input.
         if (is_array($result) && array_key_exists('retry', $result)) {
@@ -258,7 +287,7 @@ while ($position < count($steps)) {
                 workflow_fail($error);
             }
             $status['retry_error'] = $message;
-            workflow_log("$name: $node: retry requested: $message; retrying in {$delay}s");
+            workflow_log_context("$name: $node", "retry requested: $message; retrying in {$delay}s", null, 'warning');
             continue;
         }
 
@@ -343,7 +372,7 @@ if ($jobDir !== null) {
 
 // Discard resumable state on completion.
 if (is_file($checkpoint) && !@unlink($checkpoint)) {
-    workflow_fail('Cannot remove checkpoint');
+    workflow_fail(workflow_error('unlink checkpoint', 'Cannot remove checkpoint', $checkpoint));
 }
 $status['status'] = 'done';
 $status['finished'] = date('c');
@@ -357,6 +386,6 @@ workflow_release();
 if ($next !== null) {
     // Replace this process after releasing its lock.
     pcntl_exec($next[0], array_slice($next, 1));
-    workflow_log("$name: cannot execute {$next[0]}");
+    workflow_log_context($name, workflow_error('exec', "cannot execute {$next[0]}"), null, 'error');
     exit(1);
 }

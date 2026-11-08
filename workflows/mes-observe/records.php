@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once dirname(__DIR__, 2) . '/log.php';
+
 // Procedural mysqli API. Database handles remain local and never enter state.
 function mes_read_records(array $tables, string $id, ?string &$error = null): ?array
 {
@@ -87,13 +89,13 @@ function mes_read_records(array $tables, string $id, ?string &$error = null): ?a
         $options['unix_socket'] ?? null,
         $flags
     )) {
-        $error = 'MySQL connection failed: ' . mysqli_connect_error();
+        $error = workflow_error('connect MySQL', 'MySQL connection failed (code ' . mysqli_connect_errno() . ')');
         mysqli_close($db);
         return null;
     }
 
     if (!mysqli_set_charset($db, $options['charset'])) {
-        $error = 'Cannot set MySQL charset: ' . mysqli_error($db);
+        $error = workflow_error('set MySQL charset', mysqli_error($db));
     }
     // Share one read-only snapshot across requested tables.
     $transaction = false;
@@ -105,7 +107,7 @@ function mes_read_records(array $tables, string $id, ?string &$error = null): ?a
             'START TRANSACTION WITH CONSISTENT SNAPSHOT',
         ] as $sql) {
             if (!mysqli_query($db, $sql)) {
-                $error = 'Cannot start read-only snapshot: ' . mysqli_error($db);
+                $error = workflow_error('start MySQL snapshot', mysqli_error($db));
                 break;
             }
         }
@@ -122,18 +124,18 @@ function mes_read_records(array $tables, string $id, ?string &$error = null): ?a
                 $table . '` WHERE unit_id = ? LIMIT 1'
             );
             if ($statement === false) {
-                $error = 'Cannot prepare record read: ' . mysqli_error($db);
+                $error = workflow_error("prepare record read ($table)", mysqli_error($db));
                 break;
             }
             if (!mysqli_stmt_bind_param($statement, 's', $id) ||
                 !mysqli_stmt_execute($statement)) {
-                $error = 'Cannot read record: ' . mysqli_stmt_error($statement);
+                $error = workflow_error("execute record read ($table)", mysqli_stmt_error($statement));
                 mysqli_stmt_close($statement);
                 break;
             }
             $result = mysqli_stmt_get_result($statement);
             if ($result === false) {
-                $error = 'Cannot fetch record: ' . mysqli_stmt_error($statement);
+                $error = workflow_error("fetch record ($table)", mysqli_stmt_error($statement));
                 mysqli_stmt_close($statement);
                 break;
             }
@@ -154,7 +156,7 @@ function mes_read_records(array $tables, string $id, ?string &$error = null): ?a
     }
 
     if ($error === null && !mysqli_commit($db)) {
-        $error = 'Cannot commit read-only snapshot: ' . mysqli_error($db);
+        $error = workflow_error('commit MySQL snapshot', mysqli_error($db));
     }
     // Roll back failed reads before closing.
     if ($error !== null && $transaction) {

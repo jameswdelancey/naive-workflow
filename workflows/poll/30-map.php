@@ -1,11 +1,13 @@
 <?php
-// Ordinary polling has no map input.
 if (!array_key_exists('item', $state)) {
     return null;
 }
-$item = $state['item'];
-if (!is_int($item) || $item < -1_000_000 || $item > 1_000_000) {
-    return ['error' => 'Map item must be an integer between -1000000 and 1000000'];
+$error = workflow_state_get($state, 'item', $item, 'int');
+if ($error !== null) {
+    return ['error' => $error];
 }
-$state['result'] = $item * $item;
-return null;
+if ($item < -1_000_000 || $item > 1_000_000) {
+    return ['error' => 'Map item must be between -1000000 and 1000000'];
+}
+$error = workflow_state_set($state, 'result', $item * $item, 'add');
+return $error === null ? null : ['error' => $error];
