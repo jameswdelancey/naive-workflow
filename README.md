@@ -1,12 +1,10 @@
 # Naive workflow
 
-A small PHP CLI workflow runner with sequential nodes, conditional paths,
-checkpointing and retryable exceptions. Examples demonstrate both one-way
-workflow handoffs and managed child workflows that return to the parent.
+A procedural PHP CLI workflow runner: named functions, arrays, explicit error
+returns and ordinary control flow. No application classes, closures, or
+exception-based control flow.
 
-## Quick start
-
-From the repository directory (for example, `cd repos/naive-workflow`):
+## Run
 
     php run.php hello
     HELLO_APPROVED=1 php run.php hello
@@ -15,287 +13,216 @@ From the repository directory (for example, `cd repos/naive-workflow`):
     php status.php
     php status.php --json
 
-These examples assume optional mode variables are unset unless shown.
-For continuous polling, run `POLL_ONCE=0 php run.php poll`.
+Only the exact value `1` enables a demo option. `HELLO_POLL=1` enables a
+one-way handoff to poll. Poll self-chains unless `POLL_ONCE=1`; stop continuous
+polling with Ctrl-C. Child execution and handoff are independent options.
 
-Stop polling with Ctrl-C. Demo messages and runtime diagnostics go to stderr;
-`status.php` writes its human-readable or JSON output to stdout.
+Diagnostics use timestamped stderr. Status reports use stdout. PHP's configured
+timezone controls timestamps; use `php -d date.timezone=America/Los_Angeles ...`
+when an explicit timezone is needed.
 
-## Demo modes
+## Node contract
 
-- `HELLO_APPROVED=1`: select hello's approved branch; otherwise reject.
-- `HELLO_CHILD_POLL=1`: run poll as a managed child from `55-child-poll.php`.
-  The child receives `POLL_ONCE=1`; hello waits and then continues.
-- `HELLO_POLL=1`: hand off to poll from hello's `exit.php`. Hello does not return.
-- `POLL_ONCE=1`: stop poll after its current iteration; otherwise self-chain.
+Create `workflows/<name>/`, where names match `[a-zA-Z0-9_-]+`.
+Numbered PHP files execute in lexicographic order. Use consistently padded,
+unique leading sequence numbers.
 
-Only the exact value `1` enables each option. Child execution and handoff
-are independent: enabling both runs a child first and then hands off.
-An inherited `POLL_ONCE=1` also makes a handoff finite.
+Nodes share `$state`, which must contain JSON-compatible data only. Keep
+database/process handles local to a node.
 
-Hello's order is greet, retry demo, choose branch, branch action, finish
-message, optional child, then exit/handoff. The finish message precedes the
-optional child; it does not mean the entire workflow has completed.
+A numbered node returns:
 
-## Workflows and nodes
+    return null;                                 // success
+    return ['error' => 'Invalid configuration'];  // stop, exit code 1
+    return ['retry' => 5, 'error' => 'Not ready']; // retry this node
 
-Each named subdirectory of `workflows/` is a workflow; names must match
-`[a-zA-Z0-9_-]+`. Numbered PHP files execute
-in lexicographic order; use zero-padded prefixes such as `10-fetch.php` and
-`20-process.php`.
+For compatibility, reaching the end of a numbered file without a return
+also succeeds. Other numbered-node return values are rejected.
 
-Nodes share a JSON-compatible `$state` array. A fresh invocation starts with
-an empty array unless it resumes a checkpoint. Successful polling iterations
-also start with an empty state; persist data externally if it must survive
-between iterations.
+A failure retains the checkpoint containing the attempt's INPUT state.
+A retry checkpoints the attempt's MUTATED state plus an absolute retry
+deadline, waits while holding the workflow lock, then reruns the same node.
+The retry delay must be a nonnegative integer number of seconds.
 
-Write demo messages to stderr using `fwrite(STDERR, ...)`. Throw exceptions
-to signal errors; do not call `exit()` inside nodes.
+Retry state and deadlines survive manual restarts. Deadlines use wall-clock
+time, so clock changes affect waits. There is no built-in retry budget.
+Use durable, bounded retry authorization for production work.
 
-An optional `exit.php` runs after the numbered nodes. Explicitly return
-`null` to stop (omitting a return is not equivalent), or return a nonempty
-list of strings representing argv to replace the current process:
+Functions follow the same explicit-error convention: return an error string
+or null; functions returning data may accept a final by-reference `$error`
+argument. Check errors immediately and clean up resources before returning.
+Do not throw exceptions or call exit/die from a node.
 
-    return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'hello'];
-
-The executable path must be absolute and executable. Process replacement
-requires `pcntl_exec`; it avoids accumulating processes during polling.
-The exit node cannot select a sequence.
-
-## Status and startup
-
-Only one invocation of a workflow can run at a time. The `.runs/` directory
-holds locks, the latest status and checkpoints, not execution history.
-Status uses `/proc` for best-effort detection of unexpectedly stopped
-processes. This is not a health check: PID reuse may hide a stopped run.
-If `/proc` is unavailable, the recorded status is retained.
-
-The table includes the saved retry deadline with its original timezone offset.
-`UPDATED AT` (JSON: `updated_at`) shows the modification time of the exact
-status-file snapshot read, formatted in the status command's configured local
-timezone. It is not the query time or a workflow heartbeat. Contents and file
-metadata are read through the same handle so atomic replacements cannot mix
-snapshots. Missing timestamps display `-` in the table and `null` in JSON.
-The filesystem timestamp has second-level display precision and can change
-if external tools edit or touch the file; it is not a durability guarantee.
-`--json` preserves the recorded metadata; `retry_after_seconds` is a saved
-snapshot, not a live countdown. Missing status files report `idle`; unreadable
-or malformed files report `unknown`, emit timestamped stderr diagnostics and
-make the command exit nonzero while still reporting other workflows.
-
-To start the polling example in the background from the repository directory:
-
-    mkdir -p .runs &&
-    { POLL_ONCE=0 nohup php run.php poll >> .runs/poll.log 2>&1 < /dev/null & } &&
-    sleep 1 &&
-    php status.php
-
-Failed command launches are reported to stderr and exit nonzero, but the
-completed workflow remains recorded as done.
-
-## Checkpoints and automatic resume
-
-Before each node, the runner atomically saves the node name and its input
-`$state` to `.runs/<workflow>.checkpoint.json`. After an ordinary failure,
-run the same workflow again to resume at that node with its saved input
-state; changes made during the failed attempt are discarded.
-
-Successful workflows remove their checkpoint. `exit.php` is checkpointed
-too, but a failure to launch its returned command occurs after checkpoint
-removal and does not resume `exit.php`.
-
-Keep shared state JSON-compatible: arrays, strings, finite numbers, booleans
-and null. Objects, resources and closures are not supported.
-
-Nodes must be safe to retry. Files, network requests and other external
-effects are not rolled back. A crash after an external effect but before the
-next checkpoint can cause that effect to be repeated.
-
-To restart from scratch, stop the workflow first, then remove its checkpoint:
-
-    rm -f .runs/hello.checkpoint.json
-
-## Retryable exceptions
-
-A node can request another attempt by throwing `RetryableException` with a
-message and a nonnegative delay in seconds:
-
-    $state['attempts'] = ($state['attempts'] ?? 0) + 1;
-    if ($state['attempts'] === 1) {
-        throw new RetryableException('Not ready yet', 1);
-    }
-
-Unlike an ordinary failure, a retryable exception checkpoints the state
-mutated by that attempt. The runner reports `retrying`, waits at least the
-requested delay and reruns the same node. The retry deadline and state remain
-in the checkpoint if the process stops; restarting resumes the wait or retries
-immediately if the deadline has passed.
-
-Retries have no automatic limit. Nodes should manage their own retry budget
-where needed and make external side effects safe to repeat. The workflow lock
-remains held during the wait. Deadlines use wall-clock time, so clock changes
-affect waits; this is not a precise timer.
+Unexpected PHP runtime errors are bugs, not retry requests. A shutdown handler
+makes a best-effort failed status and preserves the existing checkpoint; it
+does not guarantee node-resource cleanup or graceful signal handling.
 
 ## Conditional paths
 
-Inside a numbered node, select another numbered node using:
+    $GLOBALS['nextSequence'] = $state['approved'] ? 30 : 40;
+    return null;
 
-    global $nextSequence;
-    $nextSequence = $state['approved'] ? 30 : 50;
+A target must match exactly one numbered file's leading sequence number.
+Leading zeroes are ignored. Missing/ambiguous/invalid targets fail.
+No selection means sequential execution.
 
-Or assign directly:
+Selection applies after successful return and resets before each attempt.
+A retry ignores the attempted branch. Branch endpoints must explicitly jump
+over alternatives. Backward/self jumps require bounds, waits and shutdown
+checks; they are not a retry policy.
 
-    $GLOBALS['nextSequence'] = 50;
+## Checkpoints and locks
 
-The target matches the leading sequence number: `30` selects
-`30-process.php`. Leading zeroes are ignored. A target must match exactly one
-numbered node; invalid, missing or ambiguous targets fail the current node.
+`.runs/` contains private workflow locks, checkpoints and latest status.
+Ordinary invocations use one nonblocking exclusive lock per workflow; job
+invocations use isolated locks. Locks remain held during
+retry waits and time spent waiting for a managed child.
 
-The variable resets before every attempt. Leave it unset or null to continue
-in filename order. Selection takes effect only after the node returns
-successfully; it does not skip the remainder of the current PHP file.
+Before each attempt, the runner atomically publishes the node and input state.
+After success, it checkpoints the selected next node and its input state.
+A manual rerun resumes the checkpoint. Successful completion removes it.
 
-After the selected node, normal sequential execution resumes unless it
-selects another target. Branch endpoints must explicitly jump over unwanted
-alternatives. Forward, backward and same-node jumps are supported; bound
-loops yourself. There is no automatic delay or iteration limit for jumps.
+Atomic rename prevents partial JSON snapshots; it is not an fsync durability
+guarantee. External effects are not rolled back, and a crash can replay them.
+Require idempotency: this is not exactly-once execution.
 
-## Runnable example: retry and branching
+To start fresh, first stop the workflow, inspect/archive its checkpoint, then
+deliberately remove that checkpoint. Never remove a live workflow's checkpoint.
 
-From the directory containing `repos`, run:
+## Exit and composition
 
-    php repos/naive-workflow/run.php hello
-    HELLO_APPROVED=1 php repos/naive-workflow/run.php hello
-
-Each fresh run requests a retry on the first attempt and continues on the
-second using the checkpointed state. `HELLO_APPROVED=1` selects the approved
-branch; otherwise, the rejected branch is selected.
-
-Demo messages and runtime diagnostics use local timestamps with UTC offsets.
-PHP's configured `date.timezone` determines local time; if it is set to UTC,
-the output remains UTC. For example, to select Los Angeles explicitly:
-
-    php -d date.timezone=America/Los_Angeles repos/naive-workflow/run.php hello
-
-Example session with `America/Los_Angeles` configured (timestamps are
-illustrative; the greeting uses the `USER` environment variable):
-
-    jd@jd-macbookpro82:~$ php repos/naive-workflow/run.php hello
-    [2026-11-04T12:00:00-08:00] Hello, jd!
-    [2026-11-04T12:00:00-08:00] Retry demo: requesting retry on attempt 1.
-    [2026-11-04T12:00:00-08:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
-    [2026-11-04T12:00:02-08:00] Retry demo: continued on attempt 2.
-    [2026-11-04T12:00:02-08:00] Choosing node 40.
-    [2026-11-04T12:00:02-08:00] jd: rejected branch.
-    [2026-11-04T12:00:02-08:00] Finished for jd: rejected.
-    jd@jd-macbookpro82:~$ HELLO_APPROVED=1 php repos/naive-workflow/run.php hello
-    [2026-11-04T12:00:10-08:00] Hello, jd!
-    [2026-11-04T12:00:10-08:00] Retry demo: requesting retry on attempt 1.
-    [2026-11-04T12:00:10-08:00] hello: 15-retry.php: retryable: Demo node is not ready yet; retrying in 1s
-    [2026-11-04T12:00:12-08:00] Retry demo: continued on attempt 2.
-    [2026-11-04T12:00:12-08:00] Choosing node 30.
-    [2026-11-04T12:00:12-08:00] jd: approved branch.
-    [2026-11-04T12:00:12-08:00] Finished for jd: approved.
-
-## Composing workflows
-
-Choose the mechanism based on whether control must return:
-
-| Mechanism | Process | Parent lock | On target failure |
-| --- | --- | --- | --- |
-| Exit-node handoff | Same PID, process replaced | Released before handoff | Caller remains done |
-| Managed child node | Separate PID, parent waits | Held while waiting | Parent node fails |
-
-Neither mechanism transfers `$state` or creates an isolated target instance.
-The target uses its own workflow lock and any existing checkpoint. There is
-no cross-workflow transaction or exactly-once guarantee.
-
-### One-way handoff
-
-A workflow can return another runner command from `exit.php`. This replaces
-the current process after successful completion; it is not a function call
-and does not return to the original workflow.
-
-From the repository directory, enable only the handoff and continuous poll:
-
-    HELLO_CHILD_POLL=0 HELLO_POLL=1 POLL_ONCE=0 php run.php hello
-
-Hello finishes, logs `Handing off to poll.` on stderr, and starts poll using
-the same PID. Poll then repeats until stopped with Ctrl-C. Without
-`HELLO_POLL=1`, hello's exit node explicitly returns null and stops.
-
-The command returned by hello's exit node is:
+An optional `exit.php` explicitly returns null to stop, or an argv list:
 
     return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'poll'];
 
-The runner marks hello done and releases its lock before replacing itself.
-Poll uses its own lock, status and checkpoint. State is not transferred:
-poll starts empty unless it resumes its own existing checkpoint. Persist
-shared data explicitly if needed. Environment variables are inherited;
-PHP CLI `-d` options are not automatically forwarded. Configure
-`date.timezone` persistently or include required options in the returned argv.
+Its first argument must be an absolute executable path. A successful handoff
+uses `pcntl_exec`: same PID, no accumulating child processes, no return to the
+caller. The runner marks the caller done and releases its lock first.
+A failed launch exits nonzero but does not restore the completed checkpoint.
+`exit.php` cannot select a sequence. Error/retry results are also supported.
 
-If poll cannot start, hello remains done; this is not a cross-workflow
-transaction. For a call that must return, a controller must explicitly manage
-a foreground child and its exit status, signals and cleanup instead.
+`HELLO_CHILD_POLL=1` runs a bounded parallel map followed by reduce:
 
-### Child workflow as a node
+    HELLO_CHILD_POLL=1 HELLO_POLL=0 \
+      HELLO_CHILD_ITEMS='[3,1,2,4]' HELLO_CHILD_CONCURRENCY=2 php run.php hello
 
-Unlike an `exit.php` handoff, a managed child runs in a separate process.
-The parent node waits, checks its exit status, then returns so the parent
-workflow can continue. The hello example implements this in
-`55-child-poll.php`, after its finish message and before its exit node.
+Each item runs an isolated finite poll workflow. `30-map.php` squares the input;
+hello's `60-reduce.php` sums the results: 30 for this example.
+Defaults: `[1]`, four concurrent workers, a 30-second whole-map timeout.
+An empty map reduces to zero. Items must be integers from -1000000 to 1000000;
+at most 256 items and 1-32 concurrent workers are accepted.
 
-From the repository directory:
+### Child-poll library
 
-    HELLO_CHILD_POLL=1 HELLO_POLL=0 php run.php hello
+`child-poll.php` owns poll input validation, job construction, the parallel
+controller call and successful result collection. A single item uses exactly
+the same path as multiple items; there is no separate singular child launcher.
 
-The node starts `php run.php poll` with `POLL_ONCE=1` in the child's environment.
-On a fresh run, poll performs one tick and its five-second wait, then returns
-null from its exit node. A resumed run continues from its saved node instead. Ordinary poll runs still repeat unless `POLL_ONCE=1` is set.
-`HELLO_POLL` controls the separate one-way handoff; keep it `0` when trying
-only the child example.
+The optional workflow node is only an enable check and library call:
 
-The child inherits stdout/stderr and receives the parent's effective PHP
-timezone explicitly. Parent and child have separate state, status, locks
-and checkpoints; the parent holds its lock while waiting. An existing poll
-checkpoint is resumed, and an already-running poll causes the child invocation
-to fail. This is not an isolated per-call workflow instance.
+    if (getenv('HELLO_CHILD_POLL') !== '1') {
+        return null;
+    }
+    require_once dirname(__DIR__, 2) . '/child-poll.php';
+    $error = workflow_child_poll($state);
+    return $error === null ? null : ['error' => $error];
 
-The node requires pcntl signal functions, imposes a 30-second execution timeout,
-and treats nonzero child exits as ordinary parent-node failures. On a handled
-stop or error it terminates and reaps the direct child, with a five-second
-termination grace period. It restores the parent's signal handlers afterward.
-SIGKILL or a parent crash cannot guarantee child cleanup; use an external
-supervisor when that guarantee is required.
+Other runner nodes can require the same library and call
+`workflow_child_poll($state)` directly, without copying child management code.
+The library uses `HELLO_CHILD_ITEMS` and `HELLO_CHILD_CONCURRENCY`, defaults
+to one item, and stores `child_poll_results` and `child_poll_completed` only
+after success. Reduction remains a separate application node.
 
-A parent retry may execute an already-completed child again. There is no
-cross-workflow transaction or automatic state/result transfer; child effects
-must be idempotent. Do not call the same workflow, or create a dependency
-cycle that needs a lock held by a waiting ancestor.
+### Procedural parallel API
+
+Require `parallel.php` inside a runner node:
+
+    $jobs = [
+        ['workflow' => 'poll', 'state' => ['item' => 3],
+         'env' => ['POLL_ONCE' => '1']],
+        ['workflow' => 'poll', 'state' => ['item' => 4],
+         'env' => ['POLL_ONCE' => '1']],
+    ];
+    $results = [];
+    $error = workflow_parallel($jobs, 2, 30, $results);
+    if ($error !== null) {
+        return ['error' => $error];
+    }
+    $state['mapped'] = $results;
+    return null;
+
+Jobs may select different workflows. Results are final child states in input
+order, not completion order. The helper returns an error string or null and
+exposes no partial results on error. Limits: 256 jobs, 32 active workers,
+3600 seconds including queueing/startup, 8 MiB per result.
+State must be JSON-compatible. Child stdout/stderr are inherited, not used
+as a result channel. The parent's effective timezone is forwarded explicitly.
+
+Each job owns an isolated lock, checkpoint, status and result under
+`.runs/<parent>/parallel/batch-*/job-<index>/`. Ordinary workflow locks remain
+unchanged; parallel poll jobs do not contend with each other or a normal poll.
+The parent retains its lock. Inputs are explicit rather than inherited state.
+
+`php run.php <workflow> --job-dir <absolute-existing-directory>` enables job
+mode. The caller writes input.json there before launching. A fresh invocation
+loads input; an existing checkpoint resumes saved state. Successful completion
+atomically writes final state to output.json. Consumers must check both exit
+code zero and valid output. Stale output is removed after acquiring the lock.
+Job workflows must stop: exec handoffs from exit.php are rejected.
+
+On child failure, timeout, SIGINT, SIGTERM or SIGHUP, stop launching, terminate
+all active siblings, allow a shared five-second grace period, then kill/reap
+unfinished direct children. Restore signal handlers before returning.
+SIGKILL, parent crashes, runtime bugs and arbitrary descendants still require
+external supervision where cleanup must be guaranteed.
+
+Batch input/output/runtime files are retained for inspection. There is no
+automatic retention cleanup; remove old batches only when unused.
+`status.php` reports ordinary runs; inspect each job's runtime JSON directly.
+
+Reduce only after every mapper succeeds. Results are checkpointed as input
+to the separate reduce node, so reduce failures need not rerun the map.
+A failed/replayed map starts a new batch and may repeat completed child effects;
+successful jobs from failed batches are not automatically reused. Use stable
+application idempotency keys and durable deduplication. This is not exactly-once
+execution, a distributed transaction, or shared-resource synchronization.
+Avoid recursive/cyclic calls: isolated locks do not prevent unbounded recursion.
+
+## Status
+
+Missing status files report idle. Malformed/unreadable files report unknown
+and produce a nonzero command exit while other workflows are still reported.
+`/proc` provides best-effort stopped-process detection, not a health check;
+PID reuse may hide a stopped process.
+
+`RETRY AT` preserves the recorded deadline. `retry_after_seconds` is a saved
+snapshot, not a live countdown. `UPDATED AT` / `updated_at` is the modification
+time of the exact open status-file snapshot, not query time or a heartbeat.
+Human output is sanitized and width-bounded; JSON preserves recorded metadata.
+
+## Examples
+
+Hello: greet, one explicit retry, select approved/rejected branch, finish
+message, optional managed child, exit/handoff. The finish message precedes the
+optional child and is not the workflow completion status.
+
+MES observer: see `workflows/mes-observe/README.md`. Its record adapter uses
+the procedural mysqli API, not PDO or Active Record classes.
 
 ## Tests
 
-From the repository directory, run the bounded test suite:
+Run from this directory:
 
     timeout 30s bash tests/retry.sh &&
     timeout 30s bash tests/status.sh &&
     timeout 40s bash tests/chain.sh &&
-    timeout 50s bash tests/child.sh
+    timeout 50s bash tests/child.sh &&
+    timeout 30s bash tests/mes-observe.sh &&
+    timeout 30s bash tests/procedural.sh &&
+    timeout 60s bash tests/parallel.sh
 
-Tests use temporary workflow copies rather than modifying live checkpoints.
-The test harnesses require Bash, PHP and Python 3; handoff and child examples
-also require the relevant pcntl functions and enabled process functions.
-
-- `retry.sh`: both hello branches, retry status/state, a wait observation,
-  completion and timestamped stderr-only demo output.
-- `status.sh`: status states, invalid metadata, JSON/diagnostic separation,
-  retry deadlines and the file snapshot timestamp.
-- `chain.sh`: handoff ordering, same PID, completion and default stop.
-  It replaces only the copied poll exit node with a finite return.
-- `child.sh`: actual finite poll mode, distinct PIDs, parent continuation,
-  child reaping and child-failure propagation.
-
-These tests do not establish comprehensive signal, timeout, crash-recovery
-or descendant-cleanup coverage. Add application-specific tests before using
-the child pattern for a service. See `SKILL.md` for migration guidance.
+Tests use temporary copies and fake MES records, never live checkpoints or
+a live database. Bash, Python 3 and PHP CLI are required; process composition
+also requires pcntl and enabled process functions. Live MySQL, production
+network behavior, comprehensive signal/timeout recovery, descendant cleanup
+and exactly-once effects are not established by these tests.

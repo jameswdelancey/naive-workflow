@@ -16,8 +16,9 @@ cp "$root/run.php" "$temporary/run.php"
 cp -R "$root/workflows/mes-observe" "$temporary/workflows/"
 cat > "$temporary/workflows/mes-observe/records.php" <<'PHP'
 <?php
-function mes_read_records(array $tables, string $id): array
+function mes_read_records(array $tables, string $id, ?string &$error = null): array
 {
+    $error = null;
     static $calls = [];
     $mode = getenv('MES_TEST_MODE');
     $baseline = count($tables) === 2;

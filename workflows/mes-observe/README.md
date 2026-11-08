@@ -27,8 +27,8 @@ sequence identifiers or an outbox, not unrelated table revision counters.
 ## Record contract
 
 `schema.sql` describes two hypothetical tables with one active row per unit.
-`records.php` supplies minimal read-only Active Record-style models over PDO;
-it does not assume an existing ORM dependency.
+`records.php` supplies a procedural mysqli adapter with explicit error returns;
+it has no models, ORM, classes or exception-based control flow.
 
 Producers must atomically increase `row_version` on EVERY relevant upsert,
 including updates that leave status unchanged. Versions are compared as decimal
@@ -46,13 +46,15 @@ An upsert before the initial baseline snapshot is not observed.
 
 ## Setup and execution
 
-Requires PHP CLI with pcntl, pdo_mysql and mysqlnd, and MySQL 8.x.
-On Devuan, the PDO MySQL driver can be installed with `sudo apt-get install php-mysql`.
+Requires PHP CLI with pcntl, mysqli and mysqlnd, and MySQL 8.x.
+On Devuan, install the MySQL extension with `sudo apt-get install php-mysql`.
 No package installation, schema application, grants, or live database execution
 is performed by the accompanying tests.
 
 Have a DBA provision the schema and a dedicated account with SELECT privileges
-only on these two tables. Use a TLS-configured DSN/deployment for remote databases.
+only on these two tables. For remote databases, set MES_MYSQL_SSL_CA to a trusted CA file to enable
+verified TLS. Optional MES_MYSQL_SSL_CERT and MES_MYSQL_SSL_KEY supply client
+credentials. Without MES_MYSQL_SSL_CA, this adapter does not request TLS.
 The session is additionally read-only. Producer credentials must not be used.
 
 From the repository root:
@@ -70,7 +72,7 @@ Trigger hypothetical upserts separately using a producer account, after the
 
 Defaults: five-second polls and a one-hour observation deadline.
 Supported ranges: poll 1-60 seconds; timeout 1-86400 seconds.
-PDO connection timeout is five seconds, mysqlnd read timeout five seconds,
+mysqli connection timeout is five seconds, network read timeout five seconds,
 and MySQL SELECT execution limit two seconds. These are operation timeouts,
 not a hard end-to-end network or DNS deadline.
 
@@ -107,3 +109,17 @@ They cover preexisting rows, inserts, unchanged rows, sequential completion,
 large revision values, deadline persistence, interruption/resume, stderr-only
 output and receipt creation. They do not establish live MySQL connectivity,
 SQL permissions, network timeout behavior or production CDC guarantees.
+
+## Procedural adapter contract
+
+`mes_read_records($tables, $id, $error)` returns an array or null and sets
+the by-reference error to a string on failure. Callers check the error
+immediately and return `['error' => $error]` to stop the workflow.
+Signal handling and database cleanup use explicit paths, not callbacks,
+exceptions or finally blocks.
+
+Supported MES_MYSQL_DSN fields: host, port, dbname, charset, unix_socket.
+Other fields are rejected. Persistent connections are not used. The adapter
+disables mysqli exception reporting for this CLI invocation. TLS CA/client
+configuration is part of the checkpoint connection identity; passwords may
+still rotate without changing that identity.

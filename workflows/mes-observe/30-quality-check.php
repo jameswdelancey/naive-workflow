@@ -1,4 +1,5 @@
 <?php
 require_once __DIR__ . '/common.php';
 
-mes_poll($state, 'mes_quality_checks', 30);
+$error = mes_poll($state, 'mes_quality_checks', 30);
+return $error === null ? null : ['error' => $error];

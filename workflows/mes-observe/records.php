@@ -1,93 +1,165 @@
 <?php
 declare(strict_types=1);
 
-// Minimal read-only Active Record mapping; no third-party ORM is assumed.
-abstract class MesActiveRecord
+// Procedural mysqli API. Database handles remain local and never enter state.
+function mes_read_records(array $tables, string $id, ?string &$error = null): ?array
 {
-    protected const TABLE = '';
-
-    final public static function find(PDO $db, string $id): ?array
-    {
-        // TABLE is a code-defined constant, never an environment/user identifier.
-        $statement = $db->prepare(
-            'SELECT unit_id, CAST(row_version AS CHAR) AS row_version, status FROM `' .
-            static::TABLE . '` WHERE unit_id = :id LIMIT 1'
-        );
-        try {
-            $statement->execute(['id' => $id]);
-            $row = $statement->fetch(PDO::FETCH_ASSOC);
-            if ($row === false) {
-                return null;
-            }
-            mes_version($row['row_version']);
-            return $row;
-        } finally {
-            $statement->closeCursor();
-        }
-    }
-}
-
-final class MesProductionOrder extends MesActiveRecord
-{
-    protected const TABLE = 'mes_production_orders';
-}
-
-final class MesQualityCheck extends MesActiveRecord
-{
-    protected const TABLE = 'mes_quality_checks';
-}
-
-function mes_read_records(array $tables, string $id): array
-{
-    $models = [
-        'mes_production_orders' => MesProductionOrder::class,
-        'mes_quality_checks' => MesQualityCheck::class,
-    ];
+    $error = null;
     foreach ($tables as $table) {
-        if (!isset($models[$table])) {
-            throw new InvalidArgumentException('Unknown manufacturing record type');
+        if (!in_array($table, ['mes_production_orders', 'mes_quality_checks'], true)) {
+            $error = 'Unknown manufacturing record type';
+            return null;
         }
     }
-    if (!extension_loaded('pdo_mysql') || !extension_loaded('mysqlnd')) {
-        throw new RuntimeException('Requires pdo_mysql and mysqlnd; install php-mysql');
+    if (!extension_loaded('mysqli') || !extension_loaded('mysqlnd')) {
+        $error = 'Requires mysqli and mysqlnd; install php-mysql';
+        return null;
     }
 
-    $previousTimeout = ini_set('mysqlnd.net_read_timeout', '5');
-    if ($previousTimeout === false) {
-        throw new RuntimeException('Cannot configure mysqlnd network read timeout');
+    $dsn = getenv('MES_MYSQL_DSN') ?: 'mysql:host=127.0.0.1;dbname=mes_demo;charset=utf8mb4';
+    if (!str_starts_with($dsn, 'mysql:')) {
+        $error = 'MES_MYSQL_DSN must use mysql';
+        return null;
     }
-    $db = null;
-    try {
-        $db = new PDO(
-            getenv('MES_MYSQL_DSN') ?: 'mysql:host=127.0.0.1;dbname=mes_demo;charset=utf8mb4',
-            getenv('MES_MYSQL_USER') ?: 'mes_observer',
-            getenv('MES_MYSQL_PASSWORD') ?: '',
-            [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::ATTR_EMULATE_PREPARES => false,
-                PDO::ATTR_TIMEOUT => 5,
-            ]
-        );
-        // Target MySQL 8.x, not MariaDB. The account must also be SELECT-only.
-        $db->exec('SET SESSION max_execution_time = 2000');
-        $db->exec('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-        $db->exec('SET SESSION TRANSACTION READ ONLY');
-        $db->beginTransaction();
-
-        $records = [];
-        foreach ($tables as $table) {
-            $records[$table] = $models[$table]::find($db, $id);
+    // Accept only supported connection fields.
+    $options = ['host' => '127.0.0.1', 'dbname' => 'mes_demo', 'charset' => 'utf8mb4', 'port' => '3306'];
+    foreach (explode(';', substr($dsn, 6)) as $part) {
+        if ($part === '') {
+            continue;
         }
-        $db->commit();
-        return $records;
-    } finally {
-        try {
-            if ($db !== null && $db->inTransaction()) {
-                $db->rollBack();
+        $pair = explode('=', $part, 2);
+        if (count($pair) !== 2 ||
+            !in_array($pair[0], ['host', 'dbname', 'charset', 'port', 'unix_socket'], true) ||
+            str_contains($pair[1], "\0")) {
+            $error = 'Unsupported MES_MYSQL_DSN field';
+            return null;
+        }
+        $options[$pair[0]] = $pair[1];
+    }
+    if (!preg_match('/^[0-9]{1,5}$/D', $options['port']) ||
+        (int) $options['port'] < 1 || (int) $options['port'] > 65535 ||
+        str_starts_with($options['host'], 'p:')) {
+        $error = 'Invalid MySQL port or persistent host';
+        return null;
+    }
+
+    // This CLI adapter deliberately keeps exception reporting disabled.
+    mysqli_report(MYSQLI_REPORT_OFF);
+    $db = mysqli_init();
+    if ($db === false) {
+        $error = 'Cannot initialize MySQL';
+        return null;
+    }
+    if (!mysqli_options($db, MYSQLI_OPT_CONNECT_TIMEOUT, 5) ||
+        !mysqli_options($db, MYSQLI_OPT_READ_TIMEOUT, 5)) {
+        mysqli_close($db);
+        $error = 'Cannot configure MySQL timeouts';
+        return null;
+    }
+
+    // A configured CA enables verified TLS.
+    $ca = getenv('MES_MYSQL_SSL_CA') ?: null;
+    $cert = getenv('MES_MYSQL_SSL_CERT') ?: null;
+    $key = getenv('MES_MYSQL_SSL_KEY') ?: null;
+    $flags = 0;
+    if (($cert !== null || $key !== null) && $ca === null) {
+        mysqli_close($db);
+        $error = 'Client TLS credentials require MES_MYSQL_SSL_CA';
+        return null;
+    }
+    if ($ca !== null) {
+        if (!mysqli_ssl_set($db, $key, $cert, $ca, null, null) ||
+            !mysqli_options($db, MYSQLI_OPT_SSL_VERIFY_SERVER_CERT, true)) {
+            mysqli_close($db);
+            $error = 'Cannot configure verified MySQL TLS';
+            return null;
+        }
+        $flags = MYSQLI_CLIENT_SSL;
+    }
+
+    if (!@mysqli_real_connect(
+        $db,
+        $options['host'],
+        getenv('MES_MYSQL_USER') ?: 'mes_observer',
+        getenv('MES_MYSQL_PASSWORD') ?: '',
+        $options['dbname'],
+        (int) $options['port'],
+        $options['unix_socket'] ?? null,
+        $flags
+    )) {
+        $error = 'MySQL connection failed: ' . mysqli_connect_error();
+        mysqli_close($db);
+        return null;
+    }
+
+    if (!mysqli_set_charset($db, $options['charset'])) {
+        $error = 'Cannot set MySQL charset: ' . mysqli_error($db);
+    }
+    // Share one read-only snapshot across requested tables.
+    $transaction = false;
+    if ($error === null) {
+        foreach ([
+            'SET SESSION max_execution_time = 2000',
+            'SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ',
+            'SET SESSION TRANSACTION READ ONLY',
+            'START TRANSACTION WITH CONSISTENT SNAPSHOT',
+        ] as $sql) {
+            if (!mysqli_query($db, $sql)) {
+                $error = 'Cannot start read-only snapshot: ' . mysqli_error($db);
+                break;
             }
-        } finally {
-            $db = null;
-            ini_set('mysqlnd.net_read_timeout', $previousTimeout);
+        }
+        $transaction = $error === null;
+    }
+
+    $records = [];
+    if ($error === null) {
+        foreach ($tables as $table) {
+            // Allowlist table names; bind the unit identifier.
+            $statement = mysqli_prepare(
+                $db,
+                'SELECT unit_id, CAST(row_version AS CHAR) AS row_version, status FROM `' .
+                $table . '` WHERE unit_id = ? LIMIT 1'
+            );
+            if ($statement === false) {
+                $error = 'Cannot prepare record read: ' . mysqli_error($db);
+                break;
+            }
+            if (!mysqli_stmt_bind_param($statement, 's', $id) ||
+                !mysqli_stmt_execute($statement)) {
+                $error = 'Cannot read record: ' . mysqli_stmt_error($statement);
+                mysqli_stmt_close($statement);
+                break;
+            }
+            $result = mysqli_stmt_get_result($statement);
+            if ($result === false) {
+                $error = 'Cannot fetch record: ' . mysqli_stmt_error($statement);
+                mysqli_stmt_close($statement);
+                break;
+            }
+            $row = mysqli_fetch_assoc($result);
+            mysqli_free_result($result);
+            mysqli_stmt_close($statement);
+            if ($row === false) {
+                $error = 'Cannot fetch record row';
+                break;
+            }
+            if ($row !== null &&
+                (!is_string($row['row_version'] ?? null) || !mes_version($row['row_version']))) {
+                $error = 'Expected a positive, monotonically increasing decimal row_version';
+                break;
+            }
+            $records[$table] = $row;
         }
     }
+
+    if ($error === null && !mysqli_commit($db)) {
+        $error = 'Cannot commit read-only snapshot: ' . mysqli_error($db);
+    }
+    // Roll back failed reads before closing.
+    if ($error !== null && $transaction) {
+        mysqli_rollback($db);
+    }
+    mysqli_close($db);
+    return $error === null ? $records : null;
 }

@@ -3,142 +3,244 @@ declare(strict_types=1);
 
 function mes_log(string $message): void
 {
+    $message = str_replace(["\r", "\n"], ['\\r', '\\n'], $message);
     fwrite(STDERR, '[' . date('c') . '] ' . $message . "\n");
 }
 
-function mes_config(): array
+// Parse a bounded positive environment value.
+function mes_integer(string $name, int $default, int $maximum, ?string &$error): ?int
 {
+    $raw = getenv($name);
+    if ($raw === false) {
+        return $default;
+    }
+    if (!preg_match('/^[1-9][0-9]*$/D', $raw) ||
+        strlen($raw) > 6 || (int) $raw > $maximum) {
+        $error = "Invalid $name";
+        return null;
+    }
+    return (int) $raw;
+}
+
+// Capture configuration for resume checks.
+function mes_config(?string &$error = null): ?array
+{
+    $error = null;
     $id = getenv('MES_UNIT_ID');
     if ($id === false || !preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $id)) {
-        throw new InvalidArgumentException('Set MES_UNIT_ID to a 1-64 character manufacturing unit identifier');
+        $error = 'Set MES_UNIT_ID to a 1-64 character manufacturing unit identifier';
+        return null;
     }
-    $integer = static function (string $name, int $default, int $maximum): int {
-        $raw = getenv($name);
-        if ($raw === false) {
-            return $default;
-        }
-        if (!preg_match('/^[1-9][0-9]*$/D', $raw) || strlen($raw) > 6 ||
-            (int) $raw > $maximum) {
-            throw new InvalidArgumentException("Invalid $name");
-        }
-        return (int) $raw;
-    };
+    $interval = mes_integer('MES_POLL_SECONDS', 5, 60, $error);
+    if ($error !== null) {
+        return null;
+    }
+    $timeout = mes_integer('MES_TIMEOUT_SECONDS', 3600, 86400, $error);
+    if ($error !== null) {
+        return null;
+    }
     $dsn = getenv('MES_MYSQL_DSN') ?: 'mysql:host=127.0.0.1;dbname=mes_demo;charset=utf8mb4';
     if (!str_starts_with($dsn, 'mysql:')) {
-        throw new InvalidArgumentException('MES_MYSQL_DSN must use mysql');
+        $error = 'MES_MYSQL_DSN must use mysql';
+        return null;
+    }
+    $identity = $dsn . "\0" . (getenv('MES_MYSQL_USER') ?: 'mes_observer');
+    foreach (['MES_MYSQL_SSL_CA', 'MES_MYSQL_SSL_CERT', 'MES_MYSQL_SSL_KEY'] as $name) {
+        $identity .= "\0" . (getenv($name) ?: '');
     }
     return [
         'unit_id' => $id,
-        'interval' => $integer('MES_POLL_SECONDS', 5, 60),
-        'timeout' => $integer('MES_TIMEOUT_SECONDS', 3600, 86400),
-        'database_identity' => hash('sha256', $dsn . "\0" . (getenv('MES_MYSQL_USER') ?: 'mes_observer')),
+        'interval' => $interval,
+        'timeout' => $timeout,
+        'database_identity' => hash('sha256', $identity),
     ];
 }
 
-function mes_check(array $state): void
+// Reject configuration changes and expired observations.
+function mes_check(array $state): ?string
 {
-    if (($state['config'] ?? null) !== mes_config()) {
-        throw new RuntimeException('Configuration differs from checkpoint; restore the original configuration');
+    $config = mes_config($error);
+    if ($error !== null) {
+        return $error;
+    }
+    if (($state['config'] ?? null) !== $config) {
+        return 'Configuration differs from checkpoint; restore the original configuration';
     }
     if (!is_int($state['deadline'] ?? null) || time() >= $state['deadline']) {
-        throw new RuntimeException('Observation deadline expired; checkpoint retained for inspection');
+        return 'Observation deadline expired; checkpoint retained for inspection';
     }
+    return null;
 }
 
-function mes_version(string $version): string
+function mes_version(string $version): bool
 {
-    if (!preg_match('/^[1-9][0-9]{0,19}$/D', $version)) {
-        throw new RuntimeException('Expected a positive, monotonically increasing decimal row_version');
-    }
-    return $version;
+    return preg_match('/^[1-9][0-9]{0,19}$/D', $version) === 1;
 }
 
+// Compare decimal revisions without integer conversion.
 function mes_compare(string $left, string $right): int
 {
-    mes_version($left);
-    mes_version($right);
     return (strlen($left) <=> strlen($right)) ?: strcmp($left, $right);
 }
 
-function mes_changed(?array $baseline, ?array $current): bool
+// Accept inserts or newer revisions; reject regressions.
+function mes_changed(?array $baseline, ?array $current, ?string &$error = null): bool
 {
+    $error = null;
     if ($current === null) {
         return false;
     }
-    mes_version($current['row_version']);
+    if (!is_string($current['row_version'] ?? null) ||
+        !mes_version($current['row_version']) ||
+        ($baseline !== null &&
+            (!is_string($baseline['row_version'] ?? null) ||
+             !mes_version($baseline['row_version'])))) {
+        $error = 'Expected a positive, monotonically increasing decimal row_version';
+        return false;
+    }
     if ($baseline === null) {
         return true;
     }
     $comparison = mes_compare($current['row_version'], $baseline['row_version']);
     if ($comparison < 0) {
-        throw new RuntimeException('row_version regressed; identifiers and revision counters must not be reset');
+        $error = 'row_version regressed; identifiers and revision counters must not be reset';
+        return false;
     }
     return $comparison > 0;
 }
 
-// Signal handlers are scoped to database work and interruptible waits.
-// Interruption is an ordinary failure, retaining the runner's checkpoint.
-function mes_interruptible(callable $work): void
+// Defer interruption handling to normal control flow.
+function mes_signal(int $signal): void
 {
+    $GLOBALS['mesStop'] = true;
+}
+
+// Save handlers before installing observation handlers.
+function mes_begin(array &$handlers, bool &$async): ?string
+{
+    $handlers = [];
+    $async = false;
     foreach (['pcntl_signal', 'pcntl_signal_get_handler', 'pcntl_async_signals'] as $function) {
         if (!function_exists($function)) {
-            throw new RuntimeException("Requires $function");
+            return "Requires $function";
         }
     }
-    $stop = false;
-    $handlers = [];
+    $GLOBALS['mesStop'] = false;
     $async = pcntl_async_signals();
-    try {
-        foreach ([SIGINT, SIGTERM, SIGHUP] as $signal) {
-            $handlers[$signal] = pcntl_signal_get_handler($signal);
-            pcntl_signal($signal, static function () use (&$stop): void {
-                $stop = true;
-            });
+    foreach ([SIGINT, SIGTERM, SIGHUP] as $signal) {
+        $handlers[$signal] = pcntl_signal_get_handler($signal);
+        if (!pcntl_signal($signal, 'mes_signal')) {
+            return 'Cannot install observation signal handler';
         }
-        pcntl_async_signals(true);
-        $check = static function () use (&$stop): void {
-            if ($stop) {
-                throw new RuntimeException('Observation interrupted; resume by running the same workflow');
-            }
-        };
-        $check();
-        $work($check);
-        $check();
-    } finally {
-        foreach ($handlers as $signal => $handler) {
-            pcntl_signal($signal, $handler);
-        }
+    }
+    pcntl_async_signals(true);
+    return null;
+}
+
+// Restore process-global signal settings.
+function mes_end(array $handlers, bool $async): void
+{
+    foreach ($handlers as $signal => $handler) {
+        pcntl_signal($signal, $handler);
+    }
+    if (function_exists('pcntl_async_signals')) {
         pcntl_async_signals($async);
     }
 }
 
-function mes_poll(array &$state, string $table, int $sequence): void
+function mes_check_work(array $state): ?string
+{
+    if ($GLOBALS['mesStop'] ?? false) {
+        return 'Observation interrupted; resume by running the same workflow';
+    }
+    return mes_check($state);
+}
+
+// Capture both baselines in one database snapshot.
+function mes_baseline(array &$state): ?string
 {
     require_once __DIR__ . '/records.php';
-    mes_interruptible(static function (callable $check) use (&$state, $table, $sequence): void {
-        mes_check($state);
-        $id = $state['config']['unit_id'];
-        $current = mes_read_records([$table], $id)[$table];
-        $check();
-        mes_check($state);
-        if (mes_changed($state['baseline'][$table], $current)) {
-            $state['observed'][$table] = [
-                'record' => $current,
-                'observed_at' => date('c'),
-            ];
-            mes_log("$table: observed $id at revision {$current['row_version']}");
-            return;
+    $handlers = [];
+    $async = false;
+    $error = mes_begin($handlers, $async);
+    if ($error === null) {
+        $error = mes_check_work($state);
+    }
+    if ($error === null) {
+        $records = mes_read_records(
+            ['mes_production_orders', 'mes_quality_checks'],
+            $state['config']['unit_id'],
+            $error
+        );
+        if ($error === null && !is_array($records)) {
+            $error = 'Cannot read baseline records';
         }
+    }
+    if ($error === null) {
+        $error = mes_check_work($state);
+    }
+    if ($error === null) {
+        $state['baseline'] = $records;
+        $state['armed_at'] = date('c');
+        mes_log('Baselines captured; waiting for a production-order upsert, then a quality-check upsert');
+    }
+    mes_end($handlers, $async);
+    return $error;
+}
 
-        // No work is a normal branch, not an automatic failure retry.
+// Observe once; pace unchanged records with a self-branch.
+function mes_poll(array &$state, string $table, int $sequence): ?string
+{
+    require_once __DIR__ . '/records.php';
+    $handlers = [];
+    $async = false;
+    $error = mes_begin($handlers, $async);
+    if ($error === null) {
+        $error = mes_check_work($state);
+    }
+    if ($error === null && !array_key_exists($table, $state['baseline'] ?? [])) {
+        $error = "Missing baseline for $table";
+    }
+    if ($error === null) {
+        $id = $state['config']['unit_id'];
+        $records = mes_read_records([$table], $id, $error);
+        if ($error === null &&
+            (!is_array($records) || !array_key_exists($table, $records))) {
+            $error = "Missing record result for $table";
+        }
+    }
+    if ($error === null) {
+        $error = mes_check_work($state);
+    }
+    if ($error === null) {
+        $current = $records[$table];
+        $changed = mes_changed($state['baseline'][$table], $current, $error);
+    }
+    if ($error === null && $changed) {
+        $state['observed'][$table] = [
+            'record' => $current,
+            'observed_at' => date('c'),
+        ];
+        mes_log("$table: observed $id at revision {$current['row_version']}");
+    } elseif ($error === null) {
         $until = hrtime(true) + $state['config']['interval'] * 1_000_000_000;
         while (hrtime(true) < $until) {
-            $check();
-            mes_check($state);
+            $error = mes_check_work($state);
+            if ($error !== null) {
+                break;
+            }
             usleep(100_000);
         }
-        $check();
-        mes_check($state);
-        $GLOBALS['nextSequence'] = $sequence;
-    });
+        if ($error === null) {
+            $error = mes_check_work($state);
+        }
+        if ($error === null) {
+            $GLOBALS['nextSequence'] = $sequence;
+        }
+    }
+    if ($error === null) {
+        $error = mes_check_work($state);
+    }
+    mes_end($handlers, $async);
+    return $error;
 }

@@ -15,10 +15,13 @@ with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     source = Path(sys.argv[1])
     shutil.copy2(source / "run.php", root / "run.php")
+    shutil.copy2(source / "parallel.php", root / "parallel.php")
+    shutil.copy2(source / "child-poll.php", root / "child-poll.php")
     for name in ("hello", "poll"):
         shutil.copytree(source / f"workflows/{name}", root / f"workflows/{name}")
     env = dict(os.environ, USER="child-test", HELLO_APPROVED="1",
-               HELLO_CHILD_POLL="1", HELLO_POLL="0", POLL_ONCE="0")
+               HELLO_CHILD_POLL="1", HELLO_POLL="0", POLL_ONCE="0",
+               HELLO_CHILD_ITEMS="[1]", HELLO_CHILD_CONCURRENCY="1")
 
     def run():
         # A separate process group lets the test clean up both runners on timeout.
@@ -45,17 +48,20 @@ with tempfile.TemporaryDirectory() as tmp:
     assert err.index(" polling\n") < err.index("Child workflow poll completed; continuing hello.")
 
     hello = json.loads((root / ".runs/hello.json").read_text())
-    poll = json.loads((root / ".runs/poll.json").read_text())
+    job = next((root / ".runs/hello/parallel").glob("batch-*/job-0"))
+    poll = json.loads((job / "runtime/poll.json").read_text())
+    assert json.loads((job / "output.json").read_text())["result"] == 1
+    assert not (root / ".runs/poll.json").exists()
     assert hello["status"] == poll["status"] == "done"
     assert hello["node"] == poll["node"] == "exit.php"
     assert hello["pid"] != poll["pid"]
     assert not (root / ".runs/hello.checkpoint.json").exists()
-    assert not (root / ".runs/poll.checkpoint.json").exists()
+    assert not (job / "runtime/poll.checkpoint.json").exists()
     assert not Path(f'/proc/{poll["pid"]}').exists()
 
     # A child failure must fail the parent node, not silently continue.
     (root / "workflows/poll/10-tick.php").write_text(
-        "<?php\nthrow new RuntimeException('Injected child failure');\n"
+        "<?php\nreturn ['error' => 'Injected child failure'];\n"
     )
     code, out, err = run()
     assert code != 0 and out == ""
