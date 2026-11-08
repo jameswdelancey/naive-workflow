@@ -22,4 +22,4 @@ if ($attempts === 1) {
     return workflow_result('Demo node is not ready yet', retry: 1);
 }
 workflow_log_context('hello', "Retry demo: continued on attempt $attempts.");
-return null;
+return workflow_result();

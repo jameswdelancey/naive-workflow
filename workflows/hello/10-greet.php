@@ -5,4 +5,4 @@ if ($error !== null) {
     return workflow_result($error);
 }
 workflow_log_context('hello', "Hello, $name!");
-return null;
+return workflow_result();

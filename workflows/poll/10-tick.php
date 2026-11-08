@@ -9,4 +9,4 @@ if ($error !== null) {
     return workflow_result($error);
 }
 workflow_log_context('poll', 'polling', $time);
-return null;
+return workflow_result();

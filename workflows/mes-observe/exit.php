@@ -1,2 +1,2 @@
 <?php
-return null;
+return workflow_result();

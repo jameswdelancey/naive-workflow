@@ -1,13 +1,13 @@
 <?php
 if (!array_key_exists('child_poll_completed', $state)) {
-    return null;
+    return workflow_result();
 }
 $error = workflow_state_get($state, 'child_poll_completed', $completed, 'bool');
 if ($error !== null) {
     return workflow_result($error);
 }
 if (!$completed) {
-    return null;
+    return workflow_result();
 }
 $error = workflow_state_get($state, 'child_poll_results', $results, 'array');
 if ($error !== null) {
@@ -29,4 +29,4 @@ if ($error !== null) {
     return workflow_result($error);
 }
 workflow_log_context('hello', "Reduced child poll results: $sum.");
-return null;
+return workflow_result();

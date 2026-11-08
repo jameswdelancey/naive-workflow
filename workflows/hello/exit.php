@@ -1,7 +1,7 @@
 <?php
 // Opt in to process replacement; ordinary hello runs still finish and stop.
 if (getenv('HELLO_POLL') !== '1') {
-    return null;
+    return workflow_result();
 }
 
 // The runner completes hello, releases its lock, then replaces itself with poll.

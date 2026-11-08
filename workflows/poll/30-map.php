@@ -1,6 +1,6 @@
 <?php
 if (!array_key_exists('item', $state)) {
-    return null;
+    return workflow_result();
 }
 $error = workflow_state_get($state, 'item', $item, 'int');
 if ($error !== null) {

@@ -1,6 +1,6 @@
 <?php
 if (getenv('HELLO_CHILD_POLL') !== '1') {
-    return null;
+    return workflow_result();
 }
 require_once dirname(__DIR__, 2) . '/child-poll.php';
 

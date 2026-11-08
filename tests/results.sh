@@ -89,9 +89,11 @@ return workflow_result();
     assert "demo: exit.php: handoff preparation failed" in result.stderr
 
 for path in (source / "workflows").glob("*/*.php"):
-    if path.name[0].isdigit():
+    if path.name[0].isdigit() or path.name == "exit.php":
         text = path.read_text()
+        assert "return null;" not in text, path
         assert "return ['error' =>" not in text, path
         assert "return ['retry' =>" not in text, path
+        assert "return workflow_result(" in text, path
 print("PASS: canonical node results, retry zero, invalid arguments/shapes, retained checkpoints and exit failures")
 PYTEST

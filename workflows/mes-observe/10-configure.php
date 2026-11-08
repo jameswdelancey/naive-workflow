@@ -14,4 +14,4 @@ foreach (['config' => $config, 'deadline' => time() + $config['timeout'], 'obser
 }
 $state = $updated;
 workflow_log_context('mes-observe', 'Observing manufacturing unit ' . $config['unit_id'] . '; database writes disabled');
-return null;
+return workflow_result();

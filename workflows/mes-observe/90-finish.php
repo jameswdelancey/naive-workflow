@@ -40,4 +40,4 @@ if ($error !== null) {
     return workflow_result($error);
 }
 workflow_log_context('mes-observe', 'Observation complete; no manufacturing commands or database mutations were issued');
-return null;
+return workflow_result();

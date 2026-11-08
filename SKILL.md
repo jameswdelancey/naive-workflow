@@ -9,8 +9,14 @@ Read README.md, run.php and the application before changing behavior.
 Use named functions, plain arrays, explicit error returns and ordinary control
 flow. Do not introduce application classes, closures or exception control flow.
 
-Numbered nodes return null for success, `['error' => $message]` for failure,
-or `['retry' => $seconds, 'error' => $message]` for retry.
+All explicit node outcomes use the shared constructor:
+- `return workflow_result();` for success, including skipped/disabled paths.
+- `return workflow_result($error);` for helper outcomes or failures.
+- `return workflow_result($error, retry: $seconds);` for retries.
+
+Do not use bare null returns or hand-built control arrays in workflow nodes.
+Helper functions keep their data/error contracts and may return null.
+Exit handoff argv remains a separate return contract.
 Functions return errors explicitly; check them immediately.
 Release resources on a shared cleanup path before returning an error or retry.
 Never call exit/die inside a node.
@@ -20,13 +26,14 @@ timestamped stderr diagnostics and deliberate stdout data output.
 
 # Plan paths
 
-Use small numbered nodes and `$GLOBALS['nextSequence']` for real alternatives.
+Use small numbered nodes and `workflow_next($sequence)` for real alternatives.
+Check its returned error or return `workflow_result(workflow_next($sequence))`.
 A target must identify one leading filename sequence number.
 Selection takes effect only after successful return, resets every attempt,
 and is ignored when retrying. No selection means fall-through, not completion.
 Branch endpoints must jump over unwanted alternatives.
 Every cycle needs bounded work, an interruptible wait and a shutdown check.
-Route normal stops to cleanup, and make exit.php return null after stopping.
+Route normal stops to cleanup, and make exit.php return workflow_result() after stopping.
 
 Before each attempt, the runner checkpoints input state. Ordinary errors retain
 that input; retries preserve mutated state and a retry deadline. Neither rolls
@@ -97,12 +104,13 @@ clean up and return normally without self-chaining.
 
 # Composition
 
-exit.php returns null or a nonempty argv list with an absolute executable path.
+exit.php returns workflow_result() to stop or a nonempty argv list with an
+absolute executable path for a handoff.
 A handoff completes the caller, releases its lock and replaces the process with
 pcntl_exec. It never returns or transfers state. Forward required PHP CLI settings
 explicitly. Launch failure does not restore the completed caller checkpoint.
 
-A managed child retains the parent lock, uses the target's normal lock/checkpoint
+A managed child retains the parent lock, uses an isolated job lock/checkpoint
 and returns only after its exit code is checked. Avoid self-calls and dependency
 cycles. Child success is not transactionally linked to the parent's checkpoint;
 parent replay may repeat child effects.
@@ -192,7 +200,10 @@ Run tests/state.sh and copy state.php alongside the runner in fixtures.
 # Node result constructor
 
 Use return workflow_result($error, retry: $seconds) rather than hand-built arrays.
+Use return workflow_result() even for unconditional success.
 Omit retry for failure; null error with no retry means success.
+This convention includes early skip returns and exit.php stopping.
+Do not change helper/data-return functions to node-result constructors.
 A retry needs a nonempty error string; zero is an immediate retry.
 Invalid combinations return a failure result. Do not discard the returned result.
 Helpers retain string-or-null errors; only nodes convert them to control results.

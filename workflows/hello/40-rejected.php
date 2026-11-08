@@ -8,4 +8,4 @@ if ($error !== null) {
     return workflow_result($error);
 }
 workflow_log_context('hello', "$name: rejected branch.");
-return null;
+return workflow_result();

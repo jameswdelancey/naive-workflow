@@ -32,9 +32,9 @@ database/process handles local to a node.
 
 A numbered node returns:
 
-    return null;                                 // success
-    return ['error' => 'Invalid configuration'];  // stop, exit code 1
-    return ['retry' => 5, 'error' => 'Not ready']; // retry this node
+    return workflow_result();                           // success
+    return workflow_result('Invalid configuration');    // stop, exit code 1
+    return workflow_result('Not ready', retry: 5);       // retry this node
 
 For compatibility, reaching the end of a numbered file without a return
 also succeeds. Other numbered-node return values are rejected.
@@ -59,8 +59,11 @@ does not guarantee node-resource cleanup or graceful signal handling.
 
 ## Conditional paths
 
-    $GLOBALS['nextSequence'] = $state['approved'] ? 30 : 40;
-    return null;
+    $error = workflow_state_get($state, 'approved', $approved, 'bool');
+    if ($error !== null) {
+        return workflow_result($error);
+    }
+    return workflow_result(workflow_next($approved ? 30 : 40));
 
 A target must match exactly one numbered file's leading sequence number.
 Leading zeroes are ignored. Missing/ambiguous/invalid targets fail.
@@ -91,7 +94,8 @@ deliberately remove that checkpoint. Never remove a live workflow's checkpoint.
 
 ## Exit and composition
 
-An optional `exit.php` explicitly returns null to stop, or an argv list:
+An optional `exit.php` returns `workflow_result()` to stop (it produces null),
+or an argv list for a handoff:
 
     return [PHP_BINARY, dirname(__DIR__, 2) . '/run.php', 'poll'];
 
@@ -121,11 +125,11 @@ the same path as multiple items; there is no separate singular child launcher.
 The optional workflow node is only an enable check and library call:
 
     if (getenv('HELLO_CHILD_POLL') !== '1') {
-        return null;
+        return workflow_result();
     }
     require_once dirname(__DIR__, 2) . '/child-poll.php';
     $error = workflow_child_poll($state);
-    return $error === null ? null : ['error' => $error];
+    return workflow_result($error);
 
 Other runner nodes can require the same library and call
 `workflow_child_poll($state)` directly, without copying child management code.
@@ -146,10 +150,10 @@ Require `parallel.php` inside a runner node:
     $results = [];
     $error = workflow_parallel($jobs, 2, 30, $results);
     if ($error !== null) {
-        return ['error' => $error];
+        return workflow_result($error);
     }
-    $state['mapped'] = $results;
-    return null;
+    $error = workflow_state_set($state, 'mapped', $results, 'add');
+    return workflow_result($error);
 
 Jobs may select different workflows. Results are final child states in input
 order, not completion order. The helper returns an error string or null and
@@ -213,6 +217,11 @@ the procedural mysqli API, not PDO or Active Record classes.
 
 Run from this directory:
 
+    timeout 30s bash tests/next.sh &&
+    timeout 30s bash tests/results.sh &&
+    timeout 30s bash tests/state.sh &&
+    timeout 30s bash tests/logging.sh &&
+    timeout 30s bash tests/logging-options.sh &&
     timeout 30s bash tests/retry.sh &&
     timeout 30s bash tests/status.sh &&
     timeout 40s bash tests/chain.sh &&
@@ -292,7 +301,7 @@ The runner loads state.php. Standalone tools should require it directly.
     $error = workflow_state_set($state, 'name', 'Grace');
     $error = workflow_state_remove($state, 'name');
 
-Check each returned error; nodes return `['error' => $error]`.
+Check each returned error; nodes return `workflow_result($error)`.
 Set defaults to replacing an existing key without changing its concrete type.
 Adding requires explicit `add` and rejects existing keys. Removal rejects
 missing keys. Nested paths use explicit lists, e.g. `['observed', $table]`;
@@ -339,8 +348,13 @@ with `return workflow_result($error)`. The constructor does not log or exit.
 The runner also validates returned arrays: missing/empty error messages,
 unexpected keys and invalid retry types fail with workflow/node context.
 Construction reduces mistakes but cannot make mutable PHP arrays opaque.
-Null and implicit numbered-file success remain compatible; exit argv remains
-a separate contract and is not passed through workflow_result.
+Use `return workflow_result();` for every explicit node success, including
+disabled/skipped paths and exit.php stopping. Use `workflow_result($error)` for
+helper outcomes and `workflow_result($error, retry: $seconds)` for retries.
+Do not mix bare null returns or hand-built control arrays in workflow nodes.
+Helper functions retain their own data/error contracts and may return null.
+Raw null and implicit numbered-file success remain runtime compatibility only;
+exit argv is a separate contract and is not passed through workflow_result.
 
 The runner loads result.php; standalone nodes/tools and isolated fixtures must
 load/copy it explicitly. Run `timeout 30s bash tests/results.sh`.

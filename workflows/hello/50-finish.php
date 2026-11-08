@@ -8,4 +8,4 @@ if ($error !== null) {
     return workflow_result($error);
 }
 workflow_log_context('hello', "Finished for $name: $result.");
-return null;
+return workflow_result();
