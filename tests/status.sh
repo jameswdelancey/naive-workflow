@@ -19,6 +19,8 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copy2(Path(sys.argv[1]) / "status.php", root / "status.php")
     shutil.copy2(Path(sys.argv[1]) / "log.php", root / "log.php")
     shutil.copy2(Path(sys.argv[1]) / "state.php", root / "state.php")
+    shutil.copy2(Path(sys.argv[1]) / "result.php", root / "result.php")
+    shutil.copy2(Path(sys.argv[1]) / "next.php", root / "next.php")
     (root / "workflows/demo").mkdir(parents=True)
     (root / "workflows/invalid name").mkdir()
     (root / ".runs").mkdir()

@@ -318,3 +318,52 @@ Branch loops must explicitly replace existing fields rather than re-add them.
 
 Copy state.php into isolated runner fixtures.
 Run `timeout 30s bash tests/state.sh` alongside the regression suite.
+
+## Constructing node results
+
+Use the procedural constructor instead of writing control arrays by hand:
+
+    return workflow_result();                         // success: null
+    return workflow_result($error);                   // null succeeds; string fails
+    return workflow_result('Not ready', retry: 5);     // retry after five seconds
+    return workflow_result('Try again', retry: 0);     // immediate retry
+
+Signature: `workflow_result(?string $error = null, ?int $retry = null): ?array`.
+Retry null means no retry; zero is a real retry delay. Retry requires a nonempty
+error message and a nonnegative representable delay. Invalid combinations
+produce a normal failure result, never an accidental retry or silent success.
+Strict PHP type checking applies when called from strict-types files.
+
+Helpers continue returning error strings or null. Nodes convert those errors
+with `return workflow_result($error)`. The constructor does not log or exit.
+The runner also validates returned arrays: missing/empty error messages,
+unexpected keys and invalid retry types fail with workflow/node context.
+Construction reduces mistakes but cannot make mutable PHP arrays opaque.
+Null and implicit numbered-file success remain compatible; exit argv remains
+a separate contract and is not passed through workflow_result.
+
+The runner loads result.php; standalone nodes/tools and isolated fixtures must
+load/copy it explicitly. Run `timeout 30s bash tests/results.sh`.
+
+## Checked next-sequence selection
+
+Use `workflow_next($sequence)` instead of directly assigning nextSequence:
+
+    $error = workflow_next($approved ? 30 : 40);
+    return workflow_result($error);
+
+The helper returns null on success or an error string. It accepts a nonnegative
+integer/digit string and requires exactly one matching numbered node in the
+runner's discovery snapshot. Leading zeroes are ignored, without converting
+large sequence strings to integers. Invalid requests preserve the previous
+selection; they never silently clear it. Check the error immediately.
+
+Calling the function selects the next node, not an immediate jump or return.
+The runner resets selection before every attempt and applies it only after
+success. Retry/failure does not apply the selected branch. exit.php cannot
+select a sequence. Calling outside an active runner node returns an error.
+
+The runner revalidates selection as a compatibility boundary for legacy direct
+assignments. Shipped nodes use the helper. Routing is process-local and separate
+from checkpointed application state. Copy next.php into isolated runner fixtures.
+Run `timeout 30s bash tests/next.sh`.

@@ -16,6 +16,8 @@ mkdir -p "$temporary/workflows"
 cp "$root/run.php" "$temporary/run.php"
 cp "$root/log.php" "$temporary/log.php"
 cp "$root/state.php" "$temporary/state.php"
+cp "$root/result.php" "$temporary/result.php"
+cp "$root/next.php" "$temporary/next.php"
 cp -R "$root/workflows/mes-observe" "$temporary/workflows/"
 cat > "$temporary/workflows/mes-observe/records.php" <<'PHP'
 <?php

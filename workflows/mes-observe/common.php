@@ -239,7 +239,7 @@ function mes_poll(array &$state, string $table, int $sequence): ?string
             $error = mes_check_work($state);
         }
         if ($error === null) {
-            $GLOBALS['nextSequence'] = $sequence;
+            $error = workflow_next($sequence);
         }
     }
     if ($error === null) {

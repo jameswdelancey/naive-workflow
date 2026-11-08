@@ -188,3 +188,22 @@ Guard reads for prerequisites and validate nested application invariants.
 Use local copies for multi-field commits. Avoid references, resources and objects.
 For intentional loops, replace existing fields explicitly.
 Run tests/state.sh and copy state.php alongside the runner in fixtures.
+
+# Node result constructor
+
+Use return workflow_result($error, retry: $seconds) rather than hand-built arrays.
+Omit retry for failure; null error with no retry means success.
+A retry needs a nonempty error string; zero is an immediate retry.
+Invalid combinations return a failure result. Do not discard the returned result.
+Helpers retain string-or-null errors; only nodes convert them to control results.
+The runner validates shapes even when code bypasses the constructor.
+Copy result.php into runner fixtures and run tests/results.sh.
+
+# Checked routing
+
+Use workflow_next(sequence) and return workflow_result($error).
+Do not assign the process-global selector from workflow code.
+The helper validates a unique numbered target and preserves prior selection
+on error. It does not return from the caller: finish required local work first.
+The runner resets each attempt, ignores selection on retry/failure, and rejects
+exit-node branching. Copy next.php into fixtures and run tests/next.sh.

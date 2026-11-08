@@ -18,7 +18,7 @@ for key in ("WORKFLOW_LOG_LEVEL", "WORKFLOW_LOG_FORMAT"):
 
 with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
-    for name in ("run.php", "status.php", "log.php", "state.php", "parallel.php"):
+    for name in ("run.php", "status.php", "log.php", "state.php", "result.php", "next.php", "parallel.php"):
         shutil.copy2(source / name, root / name)
     shutil.copytree(source / "workflows/poll", root / "workflows/poll")
     (root / "workflows/poll/20-wait.php").write_text("<?php\nusleep(100000);\n")

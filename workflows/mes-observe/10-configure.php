@@ -3,13 +3,13 @@ require_once __DIR__ . '/common.php';
 
 $config = mes_config($error);
 if ($error !== null) {
-    return ['error' => $error];
+    return workflow_result($error);
 }
 $updated = $state;
 foreach (['config' => $config, 'deadline' => time() + $config['timeout'], 'observed' => []] as $key => $value) {
     $error = workflow_state_set($updated, $key, $value, 'add');
     if ($error !== null) {
-        return ['error' => $error];
+        return workflow_result($error);
     }
 }
 $state = $updated;

@@ -18,6 +18,8 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copy2(source / "run.php", root / "run.php")
     shutil.copy2(source / "log.php", root / "log.php")
     shutil.copy2(source / "state.php", root / "state.php")
+    shutil.copy2(source / "result.php", root / "result.php")
+    shutil.copy2(source / "next.php", root / "next.php")
     shutil.copy2(source / "parallel.php", root / "parallel.php")
     shutil.copy2(source / "child-poll.php", root / "child-poll.php")
     for name in ("hello", "poll"):

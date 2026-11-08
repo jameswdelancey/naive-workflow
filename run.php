@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/log.php';
 require_once __DIR__ . '/state.php';
+require_once __DIR__ . '/result.php';
+require_once __DIR__ . '/next.php';
 
 // Return an error string, or null on success.
 function workflow_write(string $path, array $data): ?string
@@ -89,13 +91,6 @@ function workflow_shutdown(): void
     }
     workflow_log_context($context, $message, null, 'error');
     workflow_release();
-}
-
-// Ignore leading zeroes in branch targets.
-function workflow_normalize(string $number): string
-{
-    $number = ltrim($number, '0');
-    return $number === '' ? '0' : $number;
 }
 
 $root = __DIR__;
@@ -256,6 +251,7 @@ while ($position < count($steps)) {
         }
 
         $GLOBALS['nextSequence'] = null;
+        $GLOBALS['workflowRouting'] = ['steps' => $steps, 'node' => $node];
         $error = workflow_write($checkpoint, ['node' => $node, 'state' => $state]);
         if ($error !== null) {
             workflow_fail($error);
@@ -263,20 +259,21 @@ while ($position < count($steps)) {
 
         // Run with shared state and an explicit result.
         $result = workflow_include("$dir/$node", $state);
+        unset($GLOBALS['workflowRouting']);
         $error = workflow_state_validate($state, $fields);
         if ($error !== null) {
             workflow_fail("Node $node produced invalid state: $error");
         }
 
+        $error = workflow_result_validate($result, $node === 'exit.php');
+        if ($error !== null) {
+            workflow_fail($error);
+        }
+
         // Retries preserve mutations; failures preserve attempt input.
         if (is_array($result) && array_key_exists('retry', $result)) {
             $delay = $result['retry'];
-            $message = $result['error'] ?? 'Retry requested';
-            if (!is_int($delay) || $delay < 0 ||
-                $delay > PHP_INT_MAX - time() - 1 ||
-                !is_string($message)) {
-                workflow_fail('Invalid retry result');
-            }
+            $message = $result['error'];
             $retryAt = $delay === 0 ? time() : (int) ceil(microtime(true) + $delay);
             $error = workflow_write($checkpoint, [
                 'node' => $node,
@@ -292,9 +289,6 @@ while ($position < count($steps)) {
         }
 
         if (is_array($result) && array_key_exists('error', $result)) {
-            if (!is_string($result['error'])) {
-                workflow_fail('Invalid error result');
-            }
             workflow_fail($result['error']);
         }
 
@@ -332,21 +326,13 @@ while ($position < count($steps)) {
         if ($node === 'exit.php') {
             workflow_fail('nextSequence cannot be set by exit.php');
         }
-        if ((!is_int($target) && !is_string($target)) ||
-            !preg_match('/^[0-9]+$/D', (string) $target)) {
-            workflow_fail('nextSequence must be a nonnegative integer or digit string');
+        // Revalidate at the boundary, including legacy direct assignments.
+        $resolved = null;
+        $error = workflow_next_resolve($target, $steps, $resolved);
+        if ($error !== null) {
+            workflow_fail($error);
         }
-        $matches = [];
-        foreach ($steps as $index => $candidate) {
-            if (preg_match('/^([0-9]+)/', $candidate, $match) &&
-                workflow_normalize($match[1]) === workflow_normalize((string) $target)) {
-                $matches[] = $index;
-            }
-        }
-        if (count($matches) !== 1) {
-            workflow_fail("nextSequence $target must identify exactly one numbered node");
-        }
-        $nextPosition = $matches[0];
+        $nextPosition = $resolved;
     }
 
     // Checkpoint the next node before advancing.

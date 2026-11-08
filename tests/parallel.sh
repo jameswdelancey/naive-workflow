@@ -16,7 +16,7 @@ import time
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     source = Path(sys.argv[1])
-    for name in ("run.php", "log.php", "state.php", "parallel.php", "child-poll.php"):
+    for name in ("run.php", "log.php", "state.php", "result.php", "next.php", "parallel.php", "child-poll.php"):
         shutil.copy2(source / name, root / name)
     for name in ("hello", "poll"):
         shutil.copytree(source / "workflows" / name, root / "workflows" / name)

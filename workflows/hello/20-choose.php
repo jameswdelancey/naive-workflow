@@ -1,10 +1,13 @@
 <?php
-global $nextSequence;
 $approved = getenv('HELLO_APPROVED') === '1';
 $error = workflow_state_set($state, 'approved', $approved, 'add');
 if ($error !== null) {
-    return ['error' => $error];
+    return workflow_result($error);
 }
-$nextSequence = $approved ? 30 : 40;
-workflow_log_context('hello', "Choosing node $nextSequence.");
-return null;
+$sequence = $approved ? 30 : 40;
+$error = workflow_next($sequence);
+if ($error !== null) {
+    return workflow_result($error);
+}
+workflow_log_context('hello', "Choosing node $sequence.");
+return workflow_result();
